@@ -111,6 +111,78 @@ fn new_note_should_create_in_the_selected_category() {
 }
 
 #[test]
+fn created_note_should_request_editor_focus() {
+    let mut model = AppModel::new(&Config::default());
+    let category_id = CategoryId::new();
+    let note = Note {
+        id: NoteId::new(),
+        category_id,
+        source: String::new(),
+        title: String::new(),
+        plain_text: String::new(),
+        revision: Revision(1),
+        is_favorite: false,
+        created_at: OffsetDateTime::UNIX_EPOCH,
+        updated_at: OffsetDateTime::UNIX_EPOCH,
+        trashed_at: None,
+    };
+
+    let effects = update(
+        &mut model,
+        AppMsg::Library(LibraryReply::NoteCreated { result: Ok(note) }),
+    );
+
+    assert_eq!(
+        effects.first(),
+        Some(&Effect::FocusEditor {
+            session: EditorSessionId(1)
+        })
+    );
+}
+
+#[test]
+fn opened_note_should_request_editor_focus() {
+    let mut model = AppModel::new(&Config::default());
+    let note_id = NoteId::new();
+    let category_id = CategoryId::new();
+    let request_id = match update(
+        &mut model,
+        AppMsg::Navigation(NavigationMsg::OpenNote(note_id)),
+    )
+    .as_slice()
+    {
+        [Effect::LoadEditorNote { request_id, .. }] => *request_id,
+        _ => panic!("opening a note should load it"),
+    };
+
+    let effects = update(
+        &mut model,
+        AppMsg::Library(LibraryReply::EditorLoaded {
+            request_id,
+            result: Ok(Note {
+                id: note_id,
+                category_id,
+                source: String::from("Existing note content"),
+                title: String::from("Existing note content"),
+                plain_text: String::from("Existing note content"),
+                revision: Revision(1),
+                is_favorite: false,
+                created_at: OffsetDateTime::UNIX_EPOCH,
+                updated_at: OffsetDateTime::UNIX_EPOCH,
+                trashed_at: None,
+            }),
+        }),
+    );
+
+    assert_eq!(
+        effects,
+        vec![Effect::FocusEditor {
+            session: EditorSessionId(1)
+        }]
+    );
+}
+
+#[test]
 fn import_should_create_in_the_selected_category() {
     let mut model = AppModel::new(&Config::default());
     let category_id = CategoryId::new();
