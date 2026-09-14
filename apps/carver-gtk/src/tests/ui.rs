@@ -54,9 +54,13 @@ fn mvu_window_should_keep_sidebar_and_browser_card_presentation() -> TestResult 
     html::document_font_should_remain_css_text_inside_the_preview_head()?;
     crate::ui::formatting::tests::captured_source_selection_should_delete_marks_after_reading_offsets();
     crate::app::load_styles();
-    add::add_dialog_should_create_and_preserve_drafts()?;
+    bases::base_header_sort_should_persist_from_native_controls()?;
+    add::add_dialog_should_create_category_and_configure_new_base()?;
     add::add_dialog_should_resize_for_the_active_form()?;
     bases::delete_base_should_require_confirmation_and_keep_notes()?;
+    bases::base_search_should_open_and_clear_from_native_controls()?;
+    bases::configure_base_should_keep_the_form_in_the_scroll_viewport()?;
+    bases::base_field_picker_should_add_a_valid_custom_path()?;
     let display = gtk::gdk::Display::default().ok_or("display")?;
     assert!(
         gtk::IconTheme::for_display(&display).has_icon("carver-agent-codex-symbolic"),
@@ -354,22 +358,37 @@ fn mvu_window_should_keep_sidebar_and_browser_card_presentation() -> TestResult 
     let bases_grid = widget_as::<gtk::ColumnView>(&root, "bases-grid").ok_or("bases grid")?;
     assert!(widget_as::<gtk::Button>(&root, "back-to-notes-from-base-button").is_some());
     assert!(widget_as::<gtk::ToggleButton>(&root, "base-toggle-categories-button").is_some());
+    assert!(widget_as::<gtk::SearchBar>(&root, "base-search-bar").is_some());
+    assert!(widget_as::<gtk::SearchEntry>(&root, "base-search-entry").is_some());
+    assert!(widget_as::<gtk::ToggleButton>(&root, "base-search-toggle").is_some());
     assert!(bases_grid.shows_row_separators());
     assert!(bases_grid.shows_column_separators());
     let base_status = widget_as::<adw::StatusPage>(&root, "base-status").ok_or("base status")?;
     let base_pages = widget_as::<gtk::Stack>(&root, "base-pages").ok_or("base pages")?;
     crate::ui::bases::render_base_status(
         &crate::ui::bases::BaseViewRefs {
+            configuration: std::cell::RefCell::new(None),
+            configure: widget_as::<gtk::Button>(&root, "configure-base-button")
+                .ok_or("configure base button")?,
             delete: widget_as::<gtk::Button>(&root, "delete-base-button")
                 .ok_or("delete base button")?,
             title: widget_as::<gtk::Label>(&root, "base-title").ok_or("base title")?,
+            search_bar: widget_as::<gtk::SearchBar>(&root, "base-search-bar")
+                .ok_or("base search bar")?,
+            search_entry: widget_as::<gtk::SearchEntry>(&root, "base-search-entry")
+                .ok_or("base search entry")?,
+            search_toggle: widget_as::<gtk::ToggleButton>(&root, "base-search-toggle")
+                .ok_or("base search toggle")?,
+            last_search_open: std::cell::Cell::new(false),
             grid: bases_grid.clone(),
             pages: base_pages.clone(),
-            scroll: bases_grid
-                .parent()
-                .and_downcast::<gtk::ScrolledWindow>()
-                .ok_or("base scroll")?,
+            scroll: widget_as::<gtk::ScrolledWindow>(&root, "base-scroll").ok_or("base scroll")?,
             status: base_status.clone(),
+            load_more: widget_as::<gtk::Button>(&root, "base-load-more").ok_or("base load more")?,
+            rows: gtk::gio::ListStore::new::<glib::BoxedAnyObject>(),
+            syncing_header_sort: std::rc::Rc::new(std::cell::Cell::new(false)),
+            rendered_definition: std::cell::RefCell::new(None),
+            rendered_rows: std::cell::RefCell::new(Vec::new()),
         },
         "Couldn’t load rows",
         "Test failure",
@@ -485,10 +504,23 @@ fn mvu_window_should_keep_sidebar_and_browser_card_presentation() -> TestResult 
     );
     assert!(new_note_handled);
     assert!(run_main_context_until(|| client
-        .recent_notes(None, 10, 0)
-        .is_ok_and(|notes| notes.len() == 1)));
+        .recent_notes(
+            None,
+            carver_sdk::PageRequest {
+                limit: 10,
+                offset: 0
+            }
+        )
+        .is_ok_and(|notes| notes.items.len() == 1)));
     let note = client
-        .recent_notes(None, 10, 0)?
+        .recent_notes(
+            None,
+            carver_sdk::PageRequest {
+                limit: 10,
+                offset: 0,
+            },
+        )?
+        .items
         .pop()
         .ok_or("created note")?;
     assert!(run_main_context_until(|| all_notes_row(&sidebar).is_some()));
@@ -578,7 +610,7 @@ fn mvu_window_should_keep_sidebar_and_browser_card_presentation() -> TestResult 
     });
     assert!(favorite_row);
     let favorite_row = find_widget(&root, &format!("favorite-note:{}", note.id))
-        .and_downcast::<gtk::ListBoxRow>()
+        .and_downcast::<gtk::Box>()
         .ok_or("favorite note row")?;
     assert!(widget_as::<gtk::Image>(&root, "favorites-heading-icon").is_some());
     assert!(favorite_row.has_css_class("card"));
@@ -692,23 +724,34 @@ fn mvu_window_should_keep_sidebar_and_browser_card_presentation() -> TestResult 
     }));
     let browser_scroll = widget_as::<gtk::ScrolledWindow>(&root, "browser-content-scroll")
         .ok_or("browser content scroll")?;
-    let browser_viewport = browser_scroll
-        .child()
-        .and_downcast::<gtk::Viewport>()
-        .ok_or("browser content viewport")?;
-    let browser_clamp = browser_viewport
-        .child()
-        .and_downcast::<adw::Clamp>()
-        .ok_or("browser content clamp")?;
-    let browser_content = browser_clamp
-        .child()
-        .and_downcast::<gtk::Box>()
-        .ok_or("browser content")?;
-    let note_list = widget_as::<gtk::ListBox>(&root, "note-list").ok_or("note list")?;
+    let browser_clamp =
+        widget_as::<adw::ClampScrollable>(&root, "browser-content-clamp").ok_or("browser clamp")?;
+    assert!(
+        browser_scroll
+            .child()
+            .is_some_and(|child| child == browser_clamp)
+    );
+    let note_list = widget_as::<gtk::ListView>(&root, "note-list").ok_or("note list")?;
+    assert!(
+        note_list
+            .model()
+            .and_downcast::<gtk::NoSelection>()
+            .is_some(),
+        "note cards should not retain a selected style after pointer hover"
+    );
     assert!(
         note_list
             .parent()
-            .is_some_and(|parent| parent == browser_content)
+            .is_some_and(|parent| parent == browser_clamp)
+    );
+    assert!(
+        note_list.vadjustment().is_some(),
+        "the virtual feed must expose its scroll adjustment for paging"
+    );
+    assert_eq!(
+        note_list.vadjustment().as_ref(),
+        Some(&browser_scroll.vadjustment()),
+        "the viewport must forward its adjustment to the virtual feed"
     );
     let destination_category_row = find_widget(
         sidebar.upcast_ref(),
@@ -717,7 +760,7 @@ fn mvu_window_should_keep_sidebar_and_browser_card_presentation() -> TestResult 
     .and_downcast::<gtk::ListBoxRow>()
     .ok_or("destination category row")?;
     let notes_without_favorites = Rc::new(Cell::new(false));
-    let observed_rows = note_list.observe_children();
+    let observed_rows = note_list.model().ok_or("note list model")?;
     let observer = observed_rows.connect_items_changed({
         let root = root.clone();
         let notes_without_favorites = Rc::clone(&notes_without_favorites);
@@ -763,12 +806,13 @@ fn mvu_window_should_keep_sidebar_and_browser_card_presentation() -> TestResult 
             && find_widget(&root, &format!("note-category:{}", note.id)).is_some()
             && find_widget(&root, "note-group:today").is_some()
     }));
-    let note_row = find_widget(&root, &format!("note:{}", note.id))
-        .and_downcast::<gtk::ListBoxRow>()
-        .ok_or("note row")?;
-    assert!(note_row.has_css_class("card"));
-    assert!(note_row.has_css_class("activatable"));
-    note_row.activate();
+    let note_card = find_widget(&root, &format!("note:{}", note.id)).ok_or("note card")?;
+    let card_surface = note_card
+        .ancestor(gtk::ListBoxRow::static_type())
+        .unwrap_or_else(|| note_card.clone());
+    assert!(card_surface.has_css_class("card"));
+    assert!(card_surface.has_css_class("activatable"));
+    assert!(activate_browser_note(&note_list, note.id));
     let route_stack = widget_as::<gtk::Stack>(&root, "content-route-stack").ok_or("route stack")?;
     assert!(run_main_context_until(|| {
         route_stack.visible_child_name().as_deref() == Some("editor")
@@ -1149,6 +1193,14 @@ fn mvu_window_should_keep_sidebar_and_browser_card_presentation() -> TestResult 
         widget_as::<gtk::ToggleButton>(&root, "format-bold-button")
             .is_some_and(|button| button.is_active())
     }));
+    source.buffer().set_text("=highlight= and {,subscript,}");
+    source_buffer.ensure_highlight(&source.buffer().start_iter(), &source.buffer().end_iter());
+    assert!(
+        source_buffer.iter_has_context_class(&source.buffer().iter_at_offset(2), "carve-emphasis")
+    );
+    assert!(
+        source_buffer.iter_has_context_class(&source.buffer().iter_at_offset(19), "carve-emphasis")
+    );
     source.buffer().set_text("*bold* plain");
     select_all(&source.buffer());
     assert!(run_main_context_until(|| {
@@ -1414,9 +1466,7 @@ fn mvu_window_should_keep_sidebar_and_browser_card_presentation() -> TestResult 
     }));
     assert!(run_main_context_until(|| {
         find_widget(&root, &format!("note:{}", note.id)).is_some()
-            && find_widget(&root, "note-group:today")
-                .and_downcast::<gtk::ListBoxRow>()
-                .is_some_and(|row| !row.is_selectable())
+            && find_widget(&root, "note-group:today").is_some()
     }));
     search.set_text("Searchable");
     assert!(run_main_context_until(|| {
@@ -1433,11 +1483,9 @@ fn mvu_window_should_keep_sidebar_and_browser_card_presentation() -> TestResult 
     assert!(run_main_context_until(|| {
         !search_bar.is_search_mode() && !search_toggle.is_active() && search.text().is_empty()
     }));
-    assert!(run_main_context_until(|| widget_as::<gtk::Box>(
-        &root,
-        "browser-search-empty-card"
-    )
-    .is_some_and(|card| !card.is_visible())));
+    assert!(run_main_context_until(|| {
+        find_widget(&root, "browser-search-empty-card").is_none()
+    }));
     let restored_groups = run_main_context_until(|| {
         find_widget(&root, &format!("note:{}", note.id)).is_some()
             && find_widget(&root, "note-group:today").is_some()
@@ -1452,10 +1500,7 @@ fn mvu_window_should_keep_sidebar_and_browser_card_presentation() -> TestResult 
         )
         .into());
     }
-    let moved_note_row = find_widget(&root, &format!("note:{}", note.id))
-        .and_downcast::<gtk::ListBoxRow>()
-        .ok_or("moved note row")?;
-    moved_note_row.activate();
+    assert!(activate_browser_note(&note_list, note.id));
     assert!(run_main_context_until(|| {
         route_stack.visible_child_name().as_deref() == Some("editor")
     }));
@@ -1493,10 +1538,7 @@ fn mvu_window_should_keep_sidebar_and_browser_card_presentation() -> TestResult 
         route_stack.visible_child_name().as_deref() == Some("browser")
             && find_widget(&root, &format!("note:{}", note.id)).is_some()
     }));
-    let restored_note_row = find_widget(&root, &format!("note:{}", note.id))
-        .and_downcast::<gtk::ListBoxRow>()
-        .ok_or("restored note row")?;
-    restored_note_row.activate();
+    assert!(activate_browser_note(&note_list, note.id));
     assert!(run_main_context_until(|| {
         route_stack.visible_child_name().as_deref() == Some("editor")
     }));
@@ -1784,6 +1826,9 @@ fn assert_base_loading_delay() -> TestResult {
         id: model.bases.selected.ok_or("selected base")?,
         name: "Projects".to_owned(),
         columns: Vec::new(),
+        filter_mode: carver_sdk::BaseFilterMode::All,
+        filters: Vec::new(),
+        sorts: Vec::new(),
         revision: carver_sdk::Revision(1),
         row_count: 0,
     }]);
@@ -1825,6 +1870,9 @@ fn assert_base_note_keyboard_activation() -> TestResult {
         id: carver_sdk::BaseId::new(),
         name: "Projects".to_owned(),
         columns: Vec::new(),
+        filter_mode: carver_sdk::BaseFilterMode::All,
+        filters: Vec::new(),
+        sorts: Vec::new(),
         revision: carver_sdk::Revision(1),
         row_count: 1,
     };
@@ -1863,6 +1911,9 @@ fn assert_base_reload_preserves_buttons() -> TestResult {
         id: carver_sdk::BaseId::new(),
         name: "Projects".to_owned(),
         columns: Vec::new(),
+        filter_mode: carver_sdk::BaseFilterMode::All,
+        filters: Vec::new(),
+        sorts: Vec::new(),
         revision: carver_sdk::Revision(1),
         row_count: 7,
     };
@@ -2450,6 +2501,27 @@ fn assert_native_file_drop_should_insert_an_ordered_batch(
             && text.ends_with(") After")
     }));
     Ok(())
+}
+
+fn activate_browser_note(list: &gtk::ListView, note_id: carver_sdk::NoteId) -> bool {
+    let Some(model) = list.model() else {
+        return false;
+    };
+    let Some(position) = (0..model.n_items()).find(|position| {
+        model
+            .item(*position)
+            .and_downcast::<glib::BoxedAnyObject>()
+            .is_some_and(|item| {
+                matches!(
+                    &*item.borrow::<crate::ui::browser::BrowserFeedItem>(),
+                    crate::ui::browser::BrowserFeedItem::Note(current) if current.id == note_id
+                )
+            })
+    }) else {
+        return false;
+    };
+    list.emit_by_name::<()>("activate", &[&position]);
+    true
 }
 
 fn assert_thumbnail_should_follow_markup_kind(

@@ -8,10 +8,29 @@
 use std::error::Error;
 
 use carver_domain::{
-    BaseDefinition, BaseId, BaseRow, Category, CategoryAppearance, CategoryId, CategorySummary,
-    Note, NoteId, NoteSummary, PropertyPath, Revision, SearchHit, TrashContents, TrashPurgeResult,
+    BaseColumn, BaseDefinition, BaseFilter, BaseFilterMode, BaseId, BaseRow, BaseSort, Category,
+    CategoryAppearance, CategoryId, CategorySummary, Note, NoteId, NoteSummary, PropertyDescriptor,
+    PropertyPath, Revision, SearchHit, TrashContents, TrashPurgeResult,
 };
 use time::OffsetDateTime;
+
+/// A bounded slice of an ordered library query.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PageRequest {
+    /// Maximum number of items returned to the caller.
+    pub limit: usize,
+    /// Number of ordered items to skip before collecting this page.
+    pub offset: usize,
+}
+
+/// One ordered query page together with whether another page is available.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Page<T> {
+    /// Items in their query order.
+    pub items: Vec<T>,
+    /// Whether a following page may be requested.
+    pub has_more: bool,
+}
 
 /// Monotonically increases whenever a library mutation commits.
 ///
@@ -130,16 +149,64 @@ pub trait LibraryBackend: Send + 'static {
     fn create_base(
         &self,
         name: &str,
-        columns: &[carver_domain::BaseColumn],
+        columns: &[BaseColumn],
+    ) -> Result<BaseDefinition, Self::Error>;
+    /// Creates a saved database-style view with its complete initial configuration.
+    fn create_base_with_configuration(
+        &self,
+        name: &str,
+        columns: &[BaseColumn],
+        filter_mode: BaseFilterMode,
+        filters: &[BaseFilter],
+        sorts: &[BaseSort],
+    ) -> Result<BaseDefinition, Self::Error>;
+    /// Updates a saved view guarded by its current revision.
+    // CONTEXT: Keep the persistence boundary explicit; each configuration component maps to one
+    // independently serialized Base setting and grouping it would leak storage concerns inward.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Base configuration fields are explicit at the port"
+    )]
+    fn update_base(
+        &self,
+        base_id: BaseId,
+        revision: Revision,
+        name: &str,
+        columns: &[BaseColumn],
+        filter_mode: BaseFilterMode,
+        filters: &[BaseFilter],
+        sorts: &[BaseSort],
     ) -> Result<BaseDefinition, Self::Error>;
     /// Lists saved bases in name order.
     fn bases(&self) -> Result<Vec<BaseDefinition>, Self::Error>;
     /// Deletes a saved base definition without affecting notes.
     fn delete_base(&self, base_id: BaseId) -> Result<(), Self::Error>;
-    /// Returns rows for a saved base.
-    fn base_rows(&self, base_id: BaseId) -> Result<Vec<BaseRow>, Self::Error>;
+    /// Returns one ordered page of rows for a saved base.
+    fn base_rows(&self, base_id: BaseId, page: PageRequest) -> Result<Page<BaseRow>, Self::Error>;
+    /// Searches one saved Base's active rows by note title and body, preserving its query and sort.
+    fn search_base_rows(
+        &self,
+        base_id: BaseId,
+        query: &str,
+        page: PageRequest,
+    ) -> Result<Page<BaseRow>, Self::Error>;
+    /// Counts active rows matching a Base filter independently of saved definitions.
+    fn base_row_count(
+        &self,
+        filter_mode: BaseFilterMode,
+        filters: &[BaseFilter],
+    ) -> Result<usize, Self::Error>;
     /// Discovers all flattened properties currently present in active notes.
-    fn property_paths(&self) -> Result<Vec<PropertyPath>, Self::Error>;
+    fn property_paths(&self) -> Result<Vec<PropertyPath>, Self::Error> {
+        self.property_descriptors().map(|descriptors| {
+            descriptors
+                .into_iter()
+                .map(|descriptor| descriptor.path)
+                .collect()
+        })
+    }
+    /// Discovers typed property descriptors currently present in active notes.
+    fn property_descriptors(&self) -> Result<Vec<PropertyDescriptor>, Self::Error>;
     /// Lists recoverable trash contents.
     fn trash_contents(&self) -> Result<TrashContents, Self::Error>;
     /// Permanently removes trashed content and unreferenced managed assets.
@@ -148,9 +215,8 @@ pub trait LibraryBackend: Send + 'static {
     fn recent_notes(
         &self,
         category_id: Option<CategoryId>,
-        limit: usize,
-        offset: usize,
-    ) -> Result<Vec<NoteSummary>, Self::Error>;
+        page: PageRequest,
+    ) -> Result<Page<NoteSummary>, Self::Error>;
     /// Lists active favorite notes, optionally restricted to a category, newest favorite first.
     fn favorite_notes(
         &self,
@@ -163,8 +229,8 @@ pub trait LibraryBackend: Send + 'static {
         &self,
         query: &str,
         category_id: Option<CategoryId>,
-        limit: usize,
-    ) -> Result<Vec<SearchHit>, Self::Error>;
+        page: PageRequest,
+    ) -> Result<Page<SearchHit>, Self::Error>;
     /// Stores managed file bytes and returns their relative Carve path.
     fn store_asset(
         &self,

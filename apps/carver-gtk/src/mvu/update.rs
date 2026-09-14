@@ -1,7 +1,8 @@
 //! Pure state transitions for the application model.
 
 use super::model::{
-    ExternalChange, LibraryRevisionCheckReason, LibraryRevisionRequest, PendingNavigation,
+    ExternalChange, LibraryRevisionCheckReason, LibraryRevisionRequest, PendingBaseConfiguration,
+    PendingNavigation,
 };
 use super::{
     ActionKey, ActionMsg, AppModel, AppMsg, BasesMsg, BrowserMsg, EditorMsg, EditorSaveRequest,
@@ -41,6 +42,11 @@ pub fn update(model: &mut AppModel, message: AppMsg) -> Vec<Effect> {
             model.route = super::Route::Browser;
             Vec::new()
         }
+        AppMsg::Navigation(NavigationMsg::SearchShortcutRequested) => match model.route {
+            super::Route::Browser => open_browser_search(model),
+            super::Route::Base => open_base_search(model),
+            super::Route::Trash | super::Route::Editor => Vec::new(),
+        },
         AppMsg::Browser(message) => update_browser(model, message),
         AppMsg::Sidebar(SidebarMsg::Reload) => reload_sidebar(model).into_iter().collect(),
         AppMsg::Trash(TrashMsg::Reload) => reload_trash(model).into_iter().collect(),
@@ -109,8 +115,37 @@ pub fn update(model: &mut AppModel, message: AppMsg) -> Vec<Effect> {
     effects
 }
 
+// CONTEXT: Keeping related Base transitions in one reducer branch makes the MVU workflow auditable.
+#[expect(
+    clippy::too_many_lines,
+    reason = "Base transitions share navigation state"
+)]
 fn update_bases(model: &mut AppModel, message: BasesMsg) -> Vec<Effect> {
     match message {
+        BasesMsg::SearchShortcutRequested if model.route == super::Route::Base => {
+            open_base_search(model)
+        }
+        BasesMsg::SearchOpened => open_base_search(model),
+        BasesMsg::SearchVisibilityChanged(visible) => update_base_search_visibility(model, visible),
+        BasesMsg::SearchChanged(query) => {
+            if model.bases.search_query == query {
+                return Vec::new();
+            }
+            model.bases.search_query = query;
+            let timer_id = model.next_timer_id();
+            model.bases.search_timer = Some(timer_id);
+            vec![Effect::ScheduleBaseSearch { timer_id }]
+        }
+        BasesMsg::SearchTimerFired(timer_id) if model.bases.search_timer == Some(timer_id) => {
+            model.bases.search_timer = None;
+            model
+                .bases
+                .selected
+                .and_then(|base_id| reload_base_rows(model, base_id))
+                .into_iter()
+                .collect()
+        }
+        BasesMsg::SetSorts { sorts } => save_base_sorts(model, sorts),
         BasesMsg::Open(base_id) => {
             if model.route == super::Route::Editor {
                 model.pending_navigation = Some(PendingNavigation::Base(base_id));
@@ -123,16 +158,134 @@ fn update_bases(model: &mut AppModel, message: BasesMsg) -> Vec<Effect> {
             }
             open_base(model, base_id)
         }
-        BasesMsg::Create { name, columns } => {
+        BasesMsg::CreateConfigured {
+            name,
+            columns,
+            filter_mode,
+            filters,
+            sorts,
+        } => {
             let name = name.trim().to_owned();
             if name.is_empty() {
                 model.notice = Some(UiError::new("Base names cannot be empty."));
                 Vec::new()
             } else {
-                vec![Effect::CreateBase { name, columns }]
+                if model.bases.saving_configuration {
+                    return Vec::new();
+                }
+                model.bases.saving_configuration = true;
+                vec![Effect::CreateConfiguredBase {
+                    name,
+                    columns,
+                    filter_mode,
+                    filters,
+                    sorts,
+                }]
+            }
+        }
+        BasesMsg::ConfigureNew => {
+            if model.bases.configuration_request.is_some()
+                || model.bases.configuration_dialog.is_some()
+                || model.bases.saving_configuration
+            {
+                return Vec::new();
+            }
+            request_base_configuration(model, PendingBaseConfiguration::New)
+        }
+        BasesMsg::Configure => {
+            if model.bases.saving_configuration
+                || model.bases.configuration_dialog.is_some()
+                || model.route != super::Route::Base
+            {
+                return Vec::new();
+            }
+            let super::LoadState::Ready(definitions) = &model.bases.definitions.state else {
+                return Vec::new();
+            };
+            let Some(definition) = definitions
+                .iter()
+                .find(|base| Some(base.id) == model.bases.selected)
+                .cloned()
+            else {
+                return Vec::new();
+            };
+            request_base_configuration(model, PendingBaseConfiguration::Existing(definition))
+        }
+        BasesMsg::Update {
+            base_id,
+            revision,
+            name,
+            columns,
+            filter_mode,
+            filters,
+            sorts,
+        } => {
+            let name = name.trim().to_owned();
+            if name.is_empty() {
+                model.notice = Some(UiError::new("Base names cannot be empty."));
+                Vec::new()
+            } else {
+                if model.bases.saving_configuration {
+                    return Vec::new();
+                }
+                model.bases.saving_configuration = true;
+                vec![Effect::UpdateBase {
+                    base_id,
+                    revision,
+                    name,
+                    columns,
+                    filter_mode,
+                    filters,
+                    sorts,
+                }]
             }
         }
         BasesMsg::Reload => reload_bases(model).into_iter().collect(),
+        BasesMsg::PreviewCount {
+            dialog_id,
+            filter_mode,
+            filters,
+        } => {
+            if model.bases.configuration_dialog != Some(dialog_id) {
+                return Vec::new();
+            }
+            let timer_id = model.next_timer_id();
+            model.bases.configuration_preview_request = None;
+            model.bases.configuration_preview_timer = Some(timer_id);
+            model.bases.configuration_preview_draft = Some((dialog_id, filter_mode, filters));
+            vec![Effect::ScheduleBasePreview { timer_id }]
+        }
+        BasesMsg::PreviewCountTimerFired(timer_id)
+            if model.bases.configuration_preview_timer == Some(timer_id) =>
+        {
+            model.bases.configuration_preview_timer = None;
+            let Some((dialog_id, filter_mode, filters)) =
+                model.bases.configuration_preview_draft.take()
+            else {
+                return Vec::new();
+            };
+            if model.bases.configuration_dialog != Some(dialog_id) {
+                return Vec::new();
+            }
+            let request_id = model.next_request_id();
+            model.bases.configuration_preview_request = Some((dialog_id, request_id));
+            vec![Effect::PreviewBaseRowCount {
+                dialog_id,
+                request_id,
+                filter_mode,
+                filters,
+            }]
+        }
+        BasesMsg::ConfigurationDismissed(dialog_id) => {
+            if model.bases.configuration_dialog == Some(dialog_id) {
+                model.bases.configuration_dialog = None;
+                model.bases.configuration_preview_request = None;
+                model.bases.configuration_preview_timer = None;
+                model.bases.configuration_preview_draft = None;
+            }
+            Vec::new()
+        }
+        BasesMsg::LoadMoreRows => load_more_base_rows(model).into_iter().collect(),
         BasesMsg::Delete(base_id) => {
             if model.bases.deleting.insert(base_id) {
                 vec![Effect::DeleteBase { base_id }]
@@ -148,6 +301,50 @@ fn update_bases(model: &mut AppModel, message: BasesMsg) -> Vec<Effect> {
                 model.bases.rows_loading_elapsed = Some(request_id);
             }
             Vec::new()
+        }
+        BasesMsg::PreviewCountTimerFired(_)
+        | BasesMsg::SearchShortcutRequested
+        | BasesMsg::SearchTimerFired(_) => Vec::new(),
+    }
+}
+
+fn request_base_configuration(
+    model: &mut AppModel,
+    target: PendingBaseConfiguration,
+) -> Vec<Effect> {
+    let request_id = model.next_request_id();
+    model.bases.configuration_request = Some(request_id);
+    match &model.bases.property_descriptors.state {
+        super::LoadState::Ready(_) => prepare_base_configuration(request_id, target),
+        super::LoadState::Loading(_) => {
+            model.bases.pending_configuration = Some(target);
+            Vec::new()
+        }
+        super::LoadState::Idle | super::LoadState::Failed(_) => {
+            model.bases.pending_configuration = Some(target);
+            reload_property_descriptors(model).into_iter().collect()
+        }
+    }
+}
+
+fn present_base_configuration_dialog(model: &mut AppModel, dialog_id: super::RequestId) {
+    model.bases.configuration_dialog = Some(dialog_id);
+    model.bases.configuration_preview_request = None;
+    model.bases.configuration_preview_timer = None;
+    model.bases.configuration_preview_draft = None;
+}
+
+fn prepare_base_configuration(
+    request_id: super::RequestId,
+    target: PendingBaseConfiguration,
+) -> Vec<Effect> {
+    match target {
+        PendingBaseConfiguration::New => vec![Effect::PrepareNewBaseConfiguration { request_id }],
+        PendingBaseConfiguration::Existing(definition) => {
+            vec![Effect::PrepareBaseConfiguration {
+                request_id,
+                definition,
+            }]
         }
     }
 }
@@ -215,6 +412,9 @@ fn complete_pending_navigation(model: &mut AppModel) -> Vec<Effect> {
 }
 
 fn open_base(model: &mut AppModel, base_id: carver_sdk::BaseId) -> Vec<Effect> {
+    if model.bases.selected != Some(base_id) {
+        reset_base_search(model);
+    }
     model.route = super::Route::Base;
     model.bases.selected = Some(base_id);
     let mut effects: Vec<_> = reload_base_rows(model, base_id).into_iter().collect();
@@ -224,9 +424,76 @@ fn open_base(model: &mut AppModel, base_id: carver_sdk::BaseId) -> Vec<Effect> {
     effects
 }
 
+fn open_base_search(model: &mut AppModel) -> Vec<Effect> {
+    if model.bases.search_open {
+        return Vec::new();
+    }
+    model.bases.search_open = true;
+    Vec::new()
+}
+
+fn update_base_search_visibility(model: &mut AppModel, visible: bool) -> Vec<Effect> {
+    if model.bases.search_open == visible {
+        return Vec::new();
+    }
+    model.bases.search_open = visible;
+    if visible {
+        return Vec::new();
+    }
+    let search_changed = !model.bases.search_query.is_empty();
+    reset_base_search(model);
+    if !search_changed {
+        return Vec::new();
+    }
+    model
+        .bases
+        .selected
+        .and_then(|base_id| reload_base_rows(model, base_id))
+        .into_iter()
+        .collect()
+}
+
+fn reset_base_search(model: &mut AppModel) {
+    model.bases.search_open = false;
+    model.bases.search_query.clear();
+    model.bases.search_timer = None;
+}
+
+fn save_base_sorts(model: &mut AppModel, sorts: Vec<carver_sdk::BaseSort>) -> Vec<Effect> {
+    if model.route != super::Route::Base || model.bases.saving_configuration {
+        return Vec::new();
+    }
+    let super::LoadState::Ready(definitions) = &model.bases.definitions.state else {
+        return Vec::new();
+    };
+    let Some(definition) = definitions
+        .iter()
+        .find(|definition| Some(definition.id) == model.bases.selected)
+        .cloned()
+    else {
+        return Vec::new();
+    };
+    if definition.sorts == sorts {
+        return Vec::new();
+    }
+    update_bases(
+        model,
+        BasesMsg::Update {
+            base_id: definition.id,
+            revision: definition.revision,
+            name: definition.name,
+            columns: definition.columns,
+            filter_mode: definition.filter_mode,
+            filters: definition.filters,
+            sorts,
+        },
+    )
+}
+
 fn update_browser(model: &mut AppModel, message: BrowserMsg) -> Vec<Effect> {
     match message {
         BrowserMsg::Reload => reload_browser(model).into_iter().collect(),
+        BrowserMsg::LoadMore => load_more_browser(model).into_iter().collect(),
         BrowserMsg::SearchTimerFired(timer_id) if model.browser.search_timer == Some(timer_id) => {
             model.browser.search_timer = None;
             reload_browser(model).into_iter().collect()
@@ -1230,17 +1497,103 @@ fn category_name_effect(name: &str, effect: impl FnOnce(String) -> Effect) -> Op
     (!name.is_empty()).then(|| effect(name))
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "Library completions stay centralized so every async reply follows one reducer path"
+)]
 fn update_library(model: &mut AppModel, reply: LibraryReply) -> Vec<Effect> {
     match reply {
         LibraryReply::BasesLoaded { request_id, result } => {
             update_bases_loaded(model, request_id, result)
+        }
+        LibraryReply::PropertyDescriptorsLoaded { request_id, result } => {
+            update_property_descriptors_loaded(model, request_id, result)
         }
         LibraryReply::BaseRowsLoaded {
             request_id,
             base_id,
             result,
         } => update_base_rows_loaded(model, request_id, base_id, result),
+        LibraryReply::BaseRowsAppended {
+            request_id,
+            base_id,
+            result,
+        } => update_base_rows_appended(model, request_id, base_id, result),
         LibraryReply::BaseCreated { result } => update_base_created(model, result),
+        LibraryReply::BaseUpdated { result } => update_base_updated(model, result),
+        LibraryReply::BaseConfigurationLoaded {
+            request_id,
+            definition,
+            result,
+        } => {
+            if model.bases.configuration_request != Some(request_id) {
+                return Vec::new();
+            }
+            model.bases.configuration_request = None;
+            if model.route != super::Route::Base || model.bases.selected != Some(definition.id) {
+                return Vec::new();
+            }
+            match result {
+                Ok(()) => {
+                    let descriptors = match &model.bases.property_descriptors.state {
+                        super::LoadState::Ready(items) => items.clone(),
+                        _ => Vec::new(),
+                    };
+                    present_base_configuration_dialog(model, request_id);
+                    vec![Effect::ShowBaseConfiguration {
+                        dialog_id: request_id,
+                        definition,
+                        descriptors,
+                    }]
+                }
+                Err(error) => {
+                    model.notice = Some(error);
+                    Vec::new()
+                }
+            }
+        }
+        LibraryReply::NewBaseConfigurationLoaded { request_id, result } => {
+            if model.bases.configuration_request != Some(request_id) {
+                return Vec::new();
+            }
+            model.bases.configuration_request = None;
+            match result {
+                Ok(()) => {
+                    let descriptors = match &model.bases.property_descriptors.state {
+                        super::LoadState::Ready(items) => items.clone(),
+                        _ => Vec::new(),
+                    };
+                    present_base_configuration_dialog(model, request_id);
+                    vec![Effect::ShowNewBaseConfiguration {
+                        dialog_id: request_id,
+                        descriptors,
+                    }]
+                }
+                Err(error) => {
+                    model.notice = Some(error);
+                    Vec::new()
+                }
+            }
+        }
+        LibraryReply::BasePreviewCount {
+            dialog_id,
+            request_id,
+            result,
+        } => {
+            if model.bases.configuration_dialog != Some(dialog_id)
+                || model.bases.configuration_preview_request != Some((dialog_id, request_id))
+            {
+                return Vec::new();
+            }
+            model.bases.configuration_preview_request = None;
+            match result {
+                Ok(count) => vec![Effect::UpdateBaseConfigurationPreview { count, dialog_id }],
+                Err(error) => {
+                    model.notice = Some(error);
+                    Vec::new()
+                }
+            }
+        }
         LibraryReply::BaseDeleted { base_id, result } => {
             update_base_deleted(model, base_id, result)
         }
@@ -1284,6 +1637,9 @@ fn update_library(model: &mut AppModel, reply: LibraryReply) -> Vec<Effect> {
             result,
             favorites,
         } => update_browser_loaded(model, request_id, result, favorites),
+        LibraryReply::BrowserAppended { request_id, result } => {
+            update_browser_appended(model, request_id, result)
+        }
         LibraryReply::FavoriteChanged { action, result } => {
             update_favorite_changed(model, action, result)
         }
@@ -1354,20 +1710,31 @@ fn update_bases_loaded(
     result: Result<Vec<carver_sdk::BaseDefinition>, UiError>,
 ) -> Vec<Effect> {
     let reload = model.bases.definitions.finish(request_id, result);
-    let missing_selection = if reload {
-        None
+    let (missing_selection, missing_pending_navigation) = if reload {
+        (None, None)
     } else {
         match &model.bases.definitions.state {
-            super::LoadState::Ready(definitions) => model.bases.selected.filter(|selected| {
-                !definitions
-                    .iter()
-                    .any(|definition| definition.id == *selected)
-            }),
-            _ => None,
+            super::LoadState::Ready(definitions) => {
+                let is_missing = |base_id| {
+                    !definitions
+                        .iter()
+                        .any(|definition| definition.id == base_id)
+                };
+                let missing_selection = model.bases.selected.filter(|base_id| is_missing(*base_id));
+                let missing_pending_navigation = match model.pending_navigation {
+                    Some(PendingNavigation::Base(base_id)) if is_missing(base_id) => Some(base_id),
+                    _ => None,
+                };
+                (missing_selection, missing_pending_navigation)
+            }
+            _ => (None, None),
         }
     };
     if let Some(base_id) = missing_selection {
         clear_missing_base_selection(model, base_id);
+    }
+    if let Some(base_id) = missing_pending_navigation {
+        clear_missing_base_pending_navigation(model, base_id);
     }
     reload
         .then(|| reload_bases(model))
@@ -1387,10 +1754,70 @@ fn clear_missing_base_selection(model: &mut AppModel, base_id: carver_sdk::BaseI
     if model.editor_return_route == super::Route::Base {
         model.editor_return_route = super::Route::Browser;
     }
-    if model.pending_navigation == Some(super::model::PendingNavigation::Base(base_id)) {
+    clear_missing_base_pending_navigation(model, base_id);
+}
+
+fn clear_missing_base_pending_navigation(model: &mut AppModel, base_id: carver_sdk::BaseId) {
+    if model.pending_navigation == Some(PendingNavigation::Base(base_id)) {
         model.pending_navigation = Some(super::model::PendingNavigation::Browser(
             model.selected_category,
         ));
+    }
+}
+
+fn update_property_descriptors_loaded(
+    model: &mut AppModel,
+    request_id: super::RequestId,
+    result: Result<Vec<carver_sdk::PropertyDescriptor>, UiError>,
+) -> Vec<Effect> {
+    let reload = model.bases.property_descriptors.finish(request_id, result);
+    if reload {
+        return reload_property_descriptors(model).into_iter().collect();
+    }
+    resume_pending_base_configuration(model)
+}
+
+fn resume_pending_base_configuration(model: &mut AppModel) -> Vec<Effect> {
+    let Some(target) = model.bases.pending_configuration.take() else {
+        return Vec::new();
+    };
+    let request_id = model.bases.configuration_request.take();
+    let Some(request_id) = request_id else {
+        return Vec::new();
+    };
+    match &model.bases.property_descriptors.state {
+        super::LoadState::Ready(descriptors) => match target {
+            PendingBaseConfiguration::New => {
+                let descriptors = descriptors.clone();
+                present_base_configuration_dialog(model, request_id);
+                vec![Effect::ShowNewBaseConfiguration {
+                    dialog_id: request_id,
+                    descriptors,
+                }]
+            }
+            PendingBaseConfiguration::Existing(definition)
+                if model.route == super::Route::Base
+                    && model.bases.selected == Some(definition.id) =>
+            {
+                let descriptors = descriptors.clone();
+                present_base_configuration_dialog(model, request_id);
+                vec![Effect::ShowBaseConfiguration {
+                    dialog_id: request_id,
+                    definition,
+                    descriptors,
+                }]
+            }
+            PendingBaseConfiguration::Existing(_) => Vec::new(),
+        },
+        super::LoadState::Failed(error) => {
+            model.notice = Some(error.clone());
+            Vec::new()
+        }
+        super::LoadState::Idle | super::LoadState::Loading(_) => {
+            model.bases.configuration_request = Some(request_id);
+            model.bases.pending_configuration = Some(target);
+            Vec::new()
+        }
     }
 }
 
@@ -1398,8 +1825,21 @@ fn update_base_rows_loaded(
     model: &mut AppModel,
     request_id: super::RequestId,
     _base_id: carver_sdk::BaseId,
-    result: Result<Vec<carver_sdk::BaseRow>, UiError>,
+    result: Result<carver_sdk::Page<carver_sdk::BaseRow>, UiError>,
 ) -> Vec<Effect> {
+    let current = matches!(
+        model.bases.rows.state,
+        super::LoadState::Loading(current) if current == request_id
+    );
+    let result = result.map(|page| {
+        if current {
+            model.bases.rows_next_offset = page.items.len();
+            model.bases.rows_has_more = page.has_more;
+            model.bases.rows_append_request = None;
+            model.bases.rows_append_error = None;
+        }
+        page.items
+    });
     let reload = model.bases.rows.finish(request_id, result);
     if reload {
         return model
@@ -1412,20 +1852,85 @@ fn update_base_rows_loaded(
     Vec::new()
 }
 
+fn update_base_rows_appended(
+    model: &mut AppModel,
+    request_id: super::RequestId,
+    base_id: carver_sdk::BaseId,
+    result: Result<carver_sdk::Page<carver_sdk::BaseRow>, UiError>,
+) -> Vec<Effect> {
+    if model.bases.selected != Some(base_id) || model.bases.rows_append_request != Some(request_id)
+    {
+        return Vec::new();
+    }
+    model.bases.rows_append_request = None;
+    match result {
+        Ok(page) => {
+            let Some(rows) = (match &mut model.bases.rows.state {
+                super::LoadState::Ready(rows) => Some(rows),
+                _ => None,
+            }) else {
+                return Vec::new();
+            };
+            model.bases.rows_next_offset += page.items.len();
+            model.bases.rows_has_more = page.has_more;
+            model.bases.rows_append_error = None;
+            rows.extend(page.items);
+        }
+        Err(error) => model.bases.rows_append_error = Some(error),
+    }
+    Vec::new()
+}
+
 fn update_base_created(
     model: &mut AppModel,
     result: Result<carver_sdk::BaseDefinition, UiError>,
 ) -> Vec<Effect> {
+    let was_saving = std::mem::take(&mut model.bases.saving_configuration);
+    let completion: Vec<_> = was_saving
+        .then_some(Effect::FinishBaseConfiguration {
+            success: result.is_ok(),
+        })
+        .into_iter()
+        .collect();
     match result {
         Ok(base) => {
             model.notice = None;
-            let mut effects: Vec<_> = reload_bases(model).into_iter().collect();
+            let mut effects = completion;
+            effects.extend(reload_bases(model));
             effects.extend(update_bases(model, BasesMsg::Open(base.id)));
             effects
         }
         Err(error) => {
             model.notice = Some(error);
-            Vec::new()
+            completion
+        }
+    }
+}
+
+fn update_base_updated(
+    model: &mut AppModel,
+    result: Result<carver_sdk::BaseDefinition, UiError>,
+) -> Vec<Effect> {
+    let was_saving = std::mem::take(&mut model.bases.saving_configuration);
+    let completion: Vec<_> = was_saving
+        .then_some(Effect::FinishBaseConfiguration {
+            success: result.is_ok(),
+        })
+        .into_iter()
+        .collect();
+    match result {
+        Ok(base) => {
+            model.notice = None;
+            let mut effects = completion;
+            effects.extend(reload_bases(model));
+            if model.route == super::Route::Base && model.bases.selected == Some(base.id) {
+                effects.extend(reload_base_rows(model, base.id));
+            }
+            effects
+        }
+        Err(error) => {
+            model.notice = Some(error);
+            completion
         }
     }
 }
@@ -1555,13 +2060,22 @@ fn update_editor_asset_stored(
 fn update_browser_loaded(
     model: &mut AppModel,
     request_id: super::RequestId,
-    result: Result<Vec<carver_sdk::NoteSummary>, UiError>,
+    result: Result<carver_sdk::Page<carver_sdk::NoteSummary>, UiError>,
     favorites: Result<Vec<carver_sdk::NoteSummary>, UiError>,
 ) -> Vec<Effect> {
     let is_current = matches!(
         model.browser.notes.state,
         super::LoadState::Loading(current) if current == request_id
     );
+    let result = result.map(|page| {
+        if is_current {
+            model.browser.next_offset = page.items.len();
+            model.browser.has_more = page.has_more;
+            model.browser.append_request = None;
+            model.browser.append_error = None;
+        }
+        page.items
+    });
     let reload = model.browser.notes.finish(request_id, result);
     if is_current {
         if !reload {
@@ -1577,6 +2091,33 @@ fn update_browser_loaded(
         model.browser.loading_indicator_visible = false;
     }
     reload_browser_after(reload, model)
+}
+
+fn update_browser_appended(
+    model: &mut AppModel,
+    request_id: super::RequestId,
+    result: Result<carver_sdk::Page<carver_sdk::NoteSummary>, UiError>,
+) -> Vec<Effect> {
+    if model.browser.append_request != Some(request_id) {
+        return Vec::new();
+    }
+    model.browser.append_request = None;
+    match result {
+        Ok(page) => {
+            let Some(notes) = (match &mut model.browser.notes.state {
+                super::LoadState::Ready(notes) => Some(notes),
+                _ => None,
+            }) else {
+                return Vec::new();
+            };
+            model.browser.next_offset += page.items.len();
+            model.browser.has_more = page.has_more;
+            model.browser.append_error = None;
+            notes.extend(page.items);
+        }
+        Err(error) => model.browser.append_error = Some(error),
+    }
+    Vec::new()
 }
 
 fn update_editor_loaded(
@@ -1699,6 +2240,7 @@ fn update_default_category(model: &mut AppModel, result: Result<(), UiError>) ->
             let mut effects = [
                 reload_sidebar(model),
                 reload_bases(model),
+                reload_property_descriptors(model),
                 reload_browser(model),
             ]
             .into_iter()
@@ -1993,6 +2535,7 @@ fn reload_all_resources(model: &mut AppModel) -> Vec<Effect> {
     let mut effects: Vec<_> = [
         reload_sidebar(model),
         reload_bases(model),
+        reload_property_descriptors(model),
         reload_browser(model),
         reload_trash(model),
     ]
@@ -2198,16 +2741,52 @@ fn reload_bases(model: &mut AppModel) -> Option<Effect> {
         .then_some(Effect::LoadBases { request_id })
 }
 
-fn reload_base_rows(model: &mut AppModel, base_id: carver_sdk::BaseId) -> Option<Effect> {
+fn reload_property_descriptors(model: &mut AppModel) -> Option<Effect> {
     let request_id = model.next_request_id();
     model
+        .bases
+        .property_descriptors
+        .begin_reload(request_id)
+        .then_some(Effect::LoadPropertyDescriptors { request_id })
+}
+
+fn reload_base_rows(model: &mut AppModel, base_id: carver_sdk::BaseId) -> Option<Effect> {
+    let request_id = model.next_request_id();
+    let started = model
         .bases
         .rows
         .begin_reload(request_id)
         .then_some(Effect::LoadBaseRows {
             request_id,
             base_id,
-        })
+            query: model.bases.search_query.clone(),
+        });
+    if started.is_some() {
+        model.bases.rows_next_offset = 0;
+        model.bases.rows_has_more = false;
+        model.bases.rows_append_request = None;
+        model.bases.rows_append_error = None;
+    }
+    started
+}
+
+fn load_more_base_rows(model: &mut AppModel) -> Option<Effect> {
+    let base_id = model.bases.selected?;
+    if !model.bases.rows_has_more
+        || model.bases.rows_append_request.is_some()
+        || !matches!(model.bases.rows.state, super::LoadState::Ready(_))
+    {
+        return None;
+    }
+    let request_id = model.next_request_id();
+    model.bases.rows_append_request = Some(request_id);
+    model.bases.rows_append_error = None;
+    Some(Effect::LoadMoreBaseRows {
+        request_id,
+        base_id,
+        query: model.bases.search_query.clone(),
+        offset: model.bases.rows_next_offset,
+    })
 }
 
 fn reload_browser(model: &mut AppModel) -> Option<Effect> {
@@ -2216,11 +2795,33 @@ fn reload_browser(model: &mut AppModel) -> Option<Effect> {
     if started {
         model.browser.loading_indicator_request = Some(request_id);
         model.browser.loading_indicator_visible = false;
+        model.browser.next_offset = 0;
+        model.browser.has_more = false;
+        model.browser.append_request = None;
+        model.browser.append_error = None;
     }
     started.then_some(Effect::LoadBrowser {
         request_id,
         category_id: model.selected_category,
         query: model.browser.search_query.clone(),
+    })
+}
+
+fn load_more_browser(model: &mut AppModel) -> Option<Effect> {
+    if !model.browser.has_more
+        || model.browser.append_request.is_some()
+        || !matches!(model.browser.notes.state, super::LoadState::Ready(_))
+    {
+        return None;
+    }
+    let request_id = model.next_request_id();
+    model.browser.append_request = Some(request_id);
+    model.browser.append_error = None;
+    Some(Effect::LoadMoreBrowser {
+        request_id,
+        category_id: model.selected_category,
+        query: model.browser.search_query.clone(),
+        offset: model.browser.next_offset,
     })
 }
 

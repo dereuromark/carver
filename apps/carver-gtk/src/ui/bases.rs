@@ -1,23 +1,42 @@
 //! Native database-style grid for saved note bases.
 pub(crate) mod actions;
+pub(crate) mod field_picker;
 
-use carver_sdk::{BaseColumn, BaseDefinition, BaseRow};
+use carver_sdk::{
+    BaseColumn, BaseDefinition, BaseRow, BaseSort, BaseSortDirection, NoteId, Revision,
+};
 use gtk::prelude::*;
 use libadwaita as adw;
 
-use crate::mvu::{AppDispatcher, AppMsg, NavigationMsg};
+use crate::mvu::{AppDispatcher, AppMsg, BasesMsg, NavigationMsg};
+use crate::ui::search::{build_search_controls, connect_search_controls, install_search_shortcut};
 use crate::ui::sidebar::{CompactNavigation, back_to_notes_button, sidebar_toggle_button};
 
 /// Widgets needed to render the current saved base.
 pub(crate) struct BaseViewRefs {
+    pub(crate) configuration: std::cell::RefCell<Option<(crate::mvu::RequestId, adw::Dialog)>>,
+    pub(crate) configure: gtk::Button,
     pub(crate) delete: gtk::Button,
     pub(crate) title: gtk::Label,
+    pub(crate) search_bar: gtk::SearchBar,
+    pub(crate) search_entry: gtk::SearchEntry,
+    pub(crate) search_toggle: gtk::ToggleButton,
+    pub(crate) last_search_open: std::cell::Cell<bool>,
     pub(crate) grid: gtk::ColumnView,
     pub(crate) pages: gtk::Stack,
     pub(crate) scroll: gtk::ScrolledWindow,
     pub(crate) status: adw::StatusPage,
+    pub(crate) load_more: gtk::Button,
+    pub(crate) rows: gtk::gio::ListStore,
+    pub(crate) syncing_header_sort: std::rc::Rc<std::cell::Cell<bool>>,
+    pub(crate) rendered_definition: std::cell::RefCell<Option<BaseDefinition>>,
+    pub(crate) rendered_rows: std::cell::RefCell<Vec<(NoteId, Revision)>>,
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "the one-time Base composition keeps its widgets and paired view references together"
+)]
 pub(crate) fn build_base(
     dispatcher: &AppDispatcher,
     split_view: &adw::NavigationSplitView,
@@ -36,6 +55,8 @@ pub(crate) fn build_base(
         AppMsg::Navigation(NavigationMsg::ShowBrowser),
     );
     header.pack_start(&back);
+    let search = build_search_controls("base", "Search this Base", "Search this Base (Ctrl+F)");
+    header.pack_start(&search.toggle);
     let title = gtk::Label::new(Some("Base"));
     title.set_widget_name("base-title");
     title.add_css_class("title");
@@ -45,22 +66,17 @@ pub(crate) fn build_base(
     delete.set_tooltip_text(Some("Delete Base"));
     delete.set_action_name(Some("base.delete"));
     header.pack_end(&delete);
-    for (label, icon) in [
-        ("Columns", "view-list-symbolic"),
-        ("Filter", "funnel-symbolic"),
-        ("Sort", "view-sort-descending-symbolic"),
-    ] {
-        let button = gtk::Button::with_label(label);
-        button.set_icon_name(icon);
-        button.add_css_class("flat");
-        button.set_sensitive(false);
-        button.set_tooltip_text(Some("Coming in the next Bases iteration"));
-        header.pack_end(&button);
-    }
+    let configure = gtk::Button::with_label("Configure");
+    configure.set_icon_name("emblem-system-symbolic");
+    configure.add_css_class("flat");
+    configure.set_widget_name("configure-base-button");
+    configure.set_action_name(Some("base.configure"));
+    header.pack_end(&configure);
     toolbar.add_top_bar(&header);
+    toolbar.add_top_bar(&search.bar);
 
-    let model = gtk::StringList::new(&[]);
-    let selection = gtk::NoSelection::new(Some(model));
+    let rows = gtk::gio::ListStore::new::<glib::BoxedAnyObject>();
+    let selection = gtk::NoSelection::new(Some(rows.clone()));
     let grid = gtk::ColumnView::new(Some(selection));
     grid.set_widget_name("bases-grid");
     grid.add_css_class("data-table");
@@ -69,31 +85,81 @@ pub(crate) fn build_base(
     grid.set_show_column_separators(true);
     grid.set_hexpand(true);
     grid.set_vexpand(true);
+    let syncing_header_sort = std::rc::Rc::new(std::cell::Cell::new(false));
+    connect_header_sorting(dispatcher, &grid, std::rc::Rc::clone(&syncing_header_sort));
 
     let scroll = gtk::ScrolledWindow::new();
+    scroll.set_widget_name("base-scroll");
     scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
+    scroll.set_vexpand(true);
     scroll.set_child(Some(&grid));
     let status = adw::StatusPage::builder()
         .icon_name("view-grid-symbolic")
-        .title("No rows")
-        .description("Notes with YAML, JSON, or TOML frontmatter will appear here.")
+        .title("No matching notes")
+        .description("Notes that match this Base will appear here.")
         .build();
     status.set_widget_name("base-status");
+    let load_more = gtk::Button::with_label("Load more rows");
+    load_more.set_widget_name("base-load-more");
+    load_more.add_css_class("flat");
+    load_more.set_halign(gtk::Align::Center);
+    load_more.set_visible(false);
+    let grid_content = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    grid_content.set_vexpand(true);
+    grid_content.append(&scroll);
+    grid_content.append(&load_more);
     let pages = gtk::Stack::new();
     pages.set_widget_name("base-pages");
-    pages.add_named(&scroll, Some("grid"));
+    pages.add_named(&grid_content, Some("grid"));
     pages.add_named(&status, Some("status"));
     pages.set_visible_child_name("grid");
     toolbar.set_content(Some(&pages));
+    let dispatcher_for_button = dispatcher.clone();
+    load_more.connect_clicked(move |_| {
+        let _ = dispatcher_for_button.dispatch(AppMsg::Bases(BasesMsg::LoadMoreRows));
+    });
+    let dispatcher_for_scroll = dispatcher.clone();
+    scroll
+        .vadjustment()
+        .connect_value_changed(move |adjustment| {
+            let remaining = adjustment.upper() - adjustment.page_size() - adjustment.value();
+            if remaining <= adjustment.page_size() * 2.0 {
+                let _ = dispatcher_for_scroll.dispatch(AppMsg::Bases(BasesMsg::LoadMoreRows));
+            }
+        });
+    connect_search_controls(
+        dispatcher,
+        &search,
+        |query| AppMsg::Bases(BasesMsg::SearchChanged(query)),
+        AppMsg::Bases(BasesMsg::SearchOpened),
+        |visible| AppMsg::Bases(BasesMsg::SearchVisibilityChanged(visible)),
+    );
+    install_search_shortcut(
+        &toolbar,
+        dispatcher,
+        "base-search-shortcut",
+        AppMsg::Bases(BasesMsg::SearchShortcutRequested),
+    );
     (
         toolbar.upcast(),
         BaseViewRefs {
+            configuration: std::cell::RefCell::new(None),
+            configure,
             delete,
             title,
+            search_bar: search.bar,
+            search_entry: search.entry,
+            search_toggle: search.toggle,
+            last_search_open: std::cell::Cell::new(false),
             grid,
             pages,
             scroll,
             status,
+            load_more,
+            rows,
+            syncing_header_sort,
+            rendered_definition: std::cell::RefCell::new(None),
+            rendered_rows: std::cell::RefCell::new(Vec::new()),
         },
     )
 }
@@ -104,16 +170,55 @@ pub(crate) fn render_base_status(refs: &BaseViewRefs, title: &str, description: 
     refs.pages.set_visible_child_name("status");
 }
 
+pub(crate) fn render_base_search(refs: &BaseViewRefs, open: bool, query: &str) {
+    let was_open = refs.last_search_open.replace(open);
+    let opening = open && !was_open;
+    let closing = was_open && !open;
+    if refs.search_bar.is_search_mode() != open {
+        refs.search_bar.set_search_mode(open);
+    }
+    if refs.search_toggle.is_active() != open {
+        refs.search_toggle.set_active(open);
+    }
+    if refs.search_entry.text().as_str() != query {
+        refs.search_entry.set_text(query);
+    }
+    if opening {
+        let bar = refs.search_bar.clone();
+        let entry = refs.search_entry.clone();
+        glib::idle_add_local_once(move || {
+            if bar.is_search_mode() {
+                entry.grab_focus();
+                entry.select_region(0, -1);
+            }
+        });
+    }
+    if closing {
+        refs.grid.grab_focus();
+    }
+}
+
 pub(crate) fn render_base(
     refs: &BaseViewRefs,
     definition: &BaseDefinition,
     rows: &[BaseRow],
     dispatcher: &AppDispatcher,
 ) {
-    let horizontal = refs.scroll.hadjustment().value();
-    let vertical = refs.scroll.vadjustment().value();
     refs.title.set_text(&definition.name);
     refs.grid.set_sensitive(true);
+    if refs.rendered_definition.borrow().as_ref() != Some(definition) {
+        rebuild_columns(refs, definition, dispatcher);
+        refs.rows.remove_all();
+        refs.rendered_rows.borrow_mut().clear();
+        refs.rendered_definition.replace(Some(definition.clone()));
+    }
+    append_rows(refs, rows);
+    refs.pages
+        .set_visible_child_name(if rows.is_empty() { "status" } else { "grid" });
+}
+
+fn rebuild_columns(refs: &BaseViewRefs, definition: &BaseDefinition, dispatcher: &AppDispatcher) {
+    refs.syncing_header_sort.set(true);
     while let Some(column) = refs
         .grid
         .columns()
@@ -122,44 +227,55 @@ pub(crate) fn render_base(
     {
         refs.grid.remove_column(&column);
     }
-    append_column(&refs.grid, "Name", None, Some(dispatcher));
+    append_column(
+        &refs.grid,
+        &BaseColumn::Name,
+        "Name",
+        None,
+        Some(dispatcher),
+    );
     for column in &definition.columns {
         match column {
             BaseColumn::Name => {}
             BaseColumn::Category => {
-                append_column(&refs.grid, "Category", Some("category"), None);
+                append_column(&refs.grid, column, "Category", Some("category"), None);
             }
             BaseColumn::Updated => {
-                append_column(&refs.grid, "Updated", Some("updated"), None);
+                append_column(&refs.grid, column, "Updated", Some("updated"), None);
             }
             BaseColumn::Property(path) => append_column(
                 &refs.grid,
+                column,
                 path.0.trim_start_matches('/'),
                 Some(&path.0),
                 None,
             ),
         }
     }
-    let serialized: Vec<String> = rows
-        .iter()
-        .filter_map(|row| serde_json::to_string(row).ok())
-        .collect();
-    let borrowed: Vec<&str> = serialized.iter().map(String::as_str).collect();
-    let model = gtk::StringList::new(&borrowed);
-    refs.grid
-        .set_model(Some(&gtk::NoSelection::new(Some(model))));
-    refs.pages
-        .set_visible_child_name(if rows.is_empty() { "status" } else { "grid" });
-    let horizontal_adjustment = refs.scroll.hadjustment();
-    let vertical_adjustment = refs.scroll.vadjustment();
-    glib::idle_add_local_once(move || {
-        horizontal_adjustment.set_value(horizontal);
-        vertical_adjustment.set_value(vertical);
-    });
+    apply_header_sort(&refs.grid, &definition.sorts);
+    refs.syncing_header_sort.set(false);
+}
+
+fn append_rows(refs: &BaseViewRefs, rows: &[BaseRow]) {
+    let incoming: Vec<_> = rows.iter().map(|row| (row.note_id, row.revision)).collect();
+    let mut rendered = refs.rendered_rows.borrow_mut();
+    let appends_existing_rows = rows.len() >= rendered.len()
+        && incoming
+            .get(..rendered.len())
+            .is_some_and(|prefix| prefix == rendered.as_slice());
+    if !appends_existing_rows {
+        refs.rows.remove_all();
+        rendered.clear();
+    }
+    for row in &rows[rendered.len()..] {
+        refs.rows.append(&glib::BoxedAnyObject::new(row.clone()));
+    }
+    *rendered = incoming;
 }
 
 fn append_column(
     grid: &gtk::ColumnView,
+    column_field: &BaseColumn,
     title: &str,
     field: Option<&str>,
     dispatcher: Option<&AppDispatcher>,
@@ -188,14 +304,14 @@ fn append_column(
                 let Some(item) = weak_item.upgrade() else {
                     return;
                 };
-                let Some(string) = item.item().and_downcast::<gtk::StringObject>() else {
+                let Some(row) = item.item().and_downcast::<glib::BoxedAnyObject>() else {
                     return;
                 };
-                let Ok(row) = serde_json::from_str::<BaseRow>(&string.string()) else {
-                    return;
+                let note_id = {
+                    let row = row.borrow::<BaseRow>();
+                    row.note_id
                 };
-                let _ =
-                    dispatcher.dispatch(AppMsg::Navigation(NavigationMsg::OpenNote(row.note_id)));
+                let _ = dispatcher.dispatch(AppMsg::Navigation(NavigationMsg::OpenNote(note_id)));
             });
             item.set_child(Some(&button));
         } else {
@@ -207,7 +323,7 @@ fn append_column(
         let Some(item) = item.downcast_ref::<gtk::ListItem>() else {
             return;
         };
-        let Some(string) = item.item().and_downcast::<gtk::StringObject>() else {
+        let Some(object) = item.item().and_downcast::<glib::BoxedAnyObject>() else {
             return;
         };
         let Some(child) = item.child() else {
@@ -225,9 +341,7 @@ fn append_column(
         let Some(label) = label else {
             return;
         };
-        let Ok(row) = serde_json::from_str::<BaseRow>(&string.string()) else {
-            return;
-        };
+        let row = object.borrow::<BaseRow>();
         if child.is::<gtk::Button>() {
             child.set_widget_name(&format!("base-note:{}", row.note_id));
         }
@@ -235,9 +349,91 @@ fn append_column(
         label.set_text(&value);
     });
     let column = gtk::ColumnViewColumn::new(Some(title), Some(factory));
+    column.set_id(Some(&header_column_id(column_field)));
+    column.set_sorter(Some(&gtk::CustomSorter::new(|_, _| gtk::Ordering::Equal)));
     column.set_resizable(true);
     column.set_expand(field.is_none());
     grid.append_column(&column);
+}
+
+fn connect_header_sorting(
+    dispatcher: &AppDispatcher,
+    grid: &gtk::ColumnView,
+    syncing: std::rc::Rc<std::cell::Cell<bool>>,
+) {
+    let Some(sorter) = grid.sorter().and_downcast::<gtk::ColumnViewSorter>() else {
+        return;
+    };
+    let dispatcher = dispatcher.clone();
+    sorter.connect_changed(move |sorter, _| {
+        if syncing.get() {
+            return;
+        }
+        let sorts = header_sorts(sorter);
+        let _ = dispatcher.dispatch(AppMsg::Bases(BasesMsg::SetSorts { sorts }));
+    });
+}
+
+fn apply_header_sort(grid: &gtk::ColumnView, sorts: &[BaseSort]) {
+    grid.sort_by_column(None, gtk::SortType::Ascending);
+    // `sort_by_column` promotes the given field to primary, so restore ties first.
+    for sort in sorts.iter().rev() {
+        let column = grid
+            .columns()
+            .iter::<gtk::ColumnViewColumn>()
+            .filter_map(Result::ok)
+            .find(|column| {
+                column
+                    .id()
+                    .as_deref()
+                    .and_then(header_column_from_id)
+                    .as_ref()
+                    == Some(&sort.field)
+            });
+        let Some(column) = column else {
+            continue;
+        };
+        let direction = match sort.direction {
+            BaseSortDirection::Ascending => gtk::SortType::Ascending,
+            BaseSortDirection::Descending => gtk::SortType::Descending,
+        };
+        grid.sort_by_column(Some(&column), direction);
+    }
+}
+
+fn header_sorts(sorter: &gtk::ColumnViewSorter) -> Vec<BaseSort> {
+    (0..sorter.n_sort_columns())
+        .filter_map(|index| {
+            let (column, direction) = sorter.nth_sort_column(index);
+            let field = column?.id().as_deref().and_then(header_column_from_id)?;
+            let direction = match direction {
+                gtk::SortType::Ascending => BaseSortDirection::Ascending,
+                gtk::SortType::Descending => BaseSortDirection::Descending,
+                _ => return None,
+            };
+            Some(BaseSort { field, direction })
+        })
+        .collect()
+}
+
+fn header_column_id(column: &BaseColumn) -> String {
+    match column {
+        BaseColumn::Name => "name".to_owned(),
+        BaseColumn::Category => "category".to_owned(),
+        BaseColumn::Updated => "updated".to_owned(),
+        BaseColumn::Property(path) => format!("property:{}", path.0),
+    }
+}
+
+fn header_column_from_id(id: &str) -> Option<BaseColumn> {
+    match id {
+        "name" => Some(BaseColumn::Name),
+        "category" => Some(BaseColumn::Category),
+        "updated" => Some(BaseColumn::Updated),
+        _ => id
+            .strip_prefix("property:")
+            .map(|path| BaseColumn::Property(carver_sdk::PropertyPath(path.to_owned()))),
+    }
 }
 
 fn row_value(row: &BaseRow, field: Option<&str>) -> String {
@@ -300,5 +496,20 @@ mod tests {
         assert_eq!(row_value(&row, Some("/done")), "true");
         assert_eq!(row_value(&row, Some("/empty")), "");
         assert_eq!(row_value(&row, Some("/missing")), "");
+    }
+
+    #[test]
+    fn header_column_ids_should_round_trip_every_column_kind() {
+        let columns = [
+            BaseColumn::Name,
+            BaseColumn::Category,
+            BaseColumn::Updated,
+            BaseColumn::Property(carver_sdk::PropertyPath("/project/status".to_owned())),
+        ];
+
+        for column in columns {
+            let id = header_column_id(&column);
+            assert_eq!(header_column_from_id(&id), Some(column));
+        }
     }
 }

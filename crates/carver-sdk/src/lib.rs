@@ -7,12 +7,13 @@ use std::{error::Error, path::Path, thread};
 use async_channel::{Receiver, Sender};
 use carver_config::{AppPaths, ConfigError};
 pub use carver_domain::{
-    BaseColumn, BaseDefinition, BaseId, BaseRow, Category, CategoryAppearance, CategoryColor,
-    CategoryIcon, CategoryId, CategorySummary, DocumentImportFormat, Note, NoteId, NoteSummary,
-    PropertyPath, Revision, SearchHit, TrashContents, TrashPurgeResult, TrashedCategorySummary,
-    TrashedNoteSummary,
+    BaseColumn, BaseDefinition, BaseFilter, BaseFilterMode, BaseFilterOperator, BaseId, BaseRow,
+    BaseSort, BaseSortDirection, Category, CategoryAppearance, CategoryColor, CategoryIcon,
+    CategoryId, CategorySummary, DocumentImportFormat, Note, NoteId, NoteSummary,
+    PropertyDescriptor, PropertyKind, PropertyPath, Revision, SearchHit, TrashContents,
+    TrashPurgeResult, TrashedCategorySummary, TrashedNoteSummary,
 };
-pub use carver_library_port::{LibraryBackend, LibraryRevision};
+pub use carver_library_port::{LibraryBackend, LibraryRevision, Page, PageRequest};
 use carver_storage_sqlite::{SqliteLibrary, StorageError};
 use thiserror::Error;
 use time::OffsetDateTime;
@@ -228,6 +229,51 @@ impl<B: LibraryBackend> LibraryClient<B> {
             .await
     }
 
+    /// Creates a saved Base with its complete initial configuration without blocking the caller.
+    pub async fn create_base_with_configuration_async(
+        &self,
+        name: String,
+        columns: Vec<BaseColumn>,
+        filter_mode: BaseFilterMode,
+        filters: Vec<BaseFilter>,
+        sorts: Vec<BaseSort>,
+    ) -> Result<BaseDefinition, LibraryError<B::Error>> {
+        self.request(move |backend| {
+            backend.create_base_with_configuration(&name, &columns, filter_mode, &filters, &sorts)
+        })
+        .await
+    }
+
+    /// Updates a saved base configuration without blocking the caller.
+    // CONTEXT: Preserve one-to-one async forwarding for every user-editable Base setting.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Base configuration fields are explicit"
+    )]
+    pub async fn update_base_async(
+        &self,
+        base_id: BaseId,
+        revision: Revision,
+        name: String,
+        columns: Vec<BaseColumn>,
+        filter_mode: BaseFilterMode,
+        filters: Vec<BaseFilter>,
+        sorts: Vec<BaseSort>,
+    ) -> Result<BaseDefinition, LibraryError<B::Error>> {
+        self.request(move |backend| {
+            backend.update_base(
+                base_id,
+                revision,
+                &name,
+                &columns,
+                filter_mode,
+                &filters,
+                &sorts,
+            )
+        })
+        .await
+    }
+
     /// Lists saved bases without blocking the caller.
     pub async fn bases_async(&self) -> Result<Vec<BaseDefinition>, LibraryError<B::Error>> {
         self.request(LibraryBackend::bases).await
@@ -243,14 +289,46 @@ impl<B: LibraryBackend> LibraryClient<B> {
     pub async fn base_rows_async(
         &self,
         base_id: BaseId,
-    ) -> Result<Vec<BaseRow>, LibraryError<B::Error>> {
-        self.request(move |backend| backend.base_rows(base_id))
+        page: PageRequest,
+    ) -> Result<Page<BaseRow>, LibraryError<B::Error>> {
+        self.request(move |backend| backend.base_rows(base_id, page))
+            .await
+    }
+
+    /// Searches one saved Base without blocking the caller.
+    pub async fn search_base_rows_async(
+        &self,
+        base_id: BaseId,
+        query: String,
+        page: PageRequest,
+    ) -> Result<Page<BaseRow>, LibraryError<B::Error>> {
+        self.request(move |backend| backend.search_base_rows(base_id, &query, page))
+            .await
+    }
+
+    /// Counts rows matching a prospective Base filter without loading them.
+    ///
+    /// # Errors
+    /// Returns an error when the worker or backend cannot evaluate the filter.
+    pub async fn base_row_count_async(
+        &self,
+        filter_mode: BaseFilterMode,
+        filters: Vec<BaseFilter>,
+    ) -> Result<usize, LibraryError<B::Error>> {
+        self.request(move |backend| backend.base_row_count(filter_mode, &filters))
             .await
     }
 
     /// Discovers current frontmatter properties without blocking the caller.
     pub async fn property_paths_async(&self) -> Result<Vec<PropertyPath>, LibraryError<B::Error>> {
         self.request(LibraryBackend::property_paths).await
+    }
+
+    /// Discovers typed frontmatter property descriptors without blocking the caller.
+    pub async fn property_descriptors_async(
+        &self,
+    ) -> Result<Vec<PropertyDescriptor>, LibraryError<B::Error>> {
+        self.request(LibraryBackend::property_descriptors).await
     }
 
     /// Creates a blank note without blocking the caller.
@@ -398,10 +476,9 @@ impl<B: LibraryBackend> LibraryClient<B> {
     pub async fn recent_notes_async(
         &self,
         category_id: Option<CategoryId>,
-        limit: usize,
-        offset: usize,
-    ) -> Result<Vec<NoteSummary>, LibraryError<B::Error>> {
-        self.request(move |backend| backend.recent_notes(category_id, limit, offset))
+        page: PageRequest,
+    ) -> Result<Page<NoteSummary>, LibraryError<B::Error>> {
+        self.request(move |backend| backend.recent_notes(category_id, page))
             .await
     }
 
@@ -421,9 +498,9 @@ impl<B: LibraryBackend> LibraryClient<B> {
         &self,
         query: String,
         category_id: Option<CategoryId>,
-        limit: usize,
-    ) -> Result<Vec<SearchHit>, LibraryError<B::Error>> {
-        self.request(move |backend| backend.search(&query, category_id, limit))
+        page: PageRequest,
+    ) -> Result<Page<SearchHit>, LibraryError<B::Error>> {
+        self.request(move |backend| backend.search(&query, category_id, page))
             .await
     }
 
@@ -642,10 +719,9 @@ impl<B: LibraryBackend> LibraryClient<B> {
     pub fn recent_notes(
         &self,
         category_id: Option<CategoryId>,
-        limit: usize,
-        offset: usize,
-    ) -> Result<Vec<NoteSummary>, LibraryError<B::Error>> {
-        self.blocking(move |backend| backend.recent_notes(category_id, limit, offset))
+        page: PageRequest,
+    ) -> Result<Page<NoteSummary>, LibraryError<B::Error>> {
+        self.blocking(move |backend| backend.recent_notes(category_id, page))
     }
 
     /// Lists favorite active notes, optionally restricted to a category, synchronously for bootstrap code and tests.
@@ -663,10 +739,21 @@ impl<B: LibraryBackend> LibraryClient<B> {
         &self,
         query: &str,
         category_id: Option<CategoryId>,
-        limit: usize,
-    ) -> Result<Vec<SearchHit>, LibraryError<B::Error>> {
+        page: PageRequest,
+    ) -> Result<Page<SearchHit>, LibraryError<B::Error>> {
         let query = query.to_owned();
-        self.blocking(move |backend| backend.search(&query, category_id, limit))
+        self.blocking(move |backend| backend.search(&query, category_id, page))
+    }
+
+    /// Searches one saved Base synchronously for bootstrap code and tests.
+    pub fn search_base_rows(
+        &self,
+        base_id: BaseId,
+        query: &str,
+        page: PageRequest,
+    ) -> Result<Page<BaseRow>, LibraryError<B::Error>> {
+        let query = query.to_owned();
+        self.blocking(move |backend| backend.search_base_rows(base_id, &query, page))
     }
 
     /// Stores an image asset synchronously for bootstrap code and tests.

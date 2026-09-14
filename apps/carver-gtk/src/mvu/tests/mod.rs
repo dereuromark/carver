@@ -1,13 +1,14 @@
 use carver_config::{AppPaths, Config};
 use carver_sdk::{
-    BaseColumn, BaseDefinition, BaseId, CategoryId, DocumentImportFormat, LibraryRevision, Note,
-    NoteId, Revision,
+    BaseColumn, BaseDefinition, BaseFilter, BaseFilterMode, BaseId, CategoryId,
+    DocumentImportFormat, LibraryRevision, Note, NoteId, Page, PageRequest, Revision,
 };
 use carver_sdk::{LibraryBackend, LibraryClient};
 use carver_storage_sqlite::SqliteLibrary;
 use gtk::gio::prelude::FileExt;
 use time::OffsetDateTime;
 
+use super::model::PendingNavigation;
 use super::{
     ActionKey, ActionMsg, AppDispatcher, AppModel, AppMsg, AppRuntime, BasesMsg, BrowserMsg,
     EditorCopyScope, EditorExportFormat, EditorMsg, EditorSaveRequest, EditorSaveState,

@@ -4,17 +4,34 @@ use crate::ui::tests::support::{TestResult, run_main_context_until, test_state, 
 use gtk::prelude::*;
 use libadwaita::{self as adw, prelude::*};
 
-pub(super) fn add_dialog_should_create_and_preserve_drafts() -> TestResult {
+#[expect(
+    clippy::too_many_lines,
+    reason = "One interaction scenario covers the complete shared creation flow"
+)]
+pub(super) fn add_dialog_should_create_category_and_configure_new_base() -> TestResult {
     let (_temporary, client) = test_state()?;
     let dispatcher = AppDispatcher::default();
     let routes = gtk::Stack::new();
-    for name in ["browser", "base"] {
-        routes.add_named(&gtk::Box::new(gtk::Orientation::Vertical, 0), Some(name));
-    }
+    routes.add_named(
+        &gtk::Box::new(gtk::Orientation::Vertical, 0),
+        Some("browser"),
+    );
+    let split_view = adw::NavigationSplitView::new();
+    let compact_navigation = std::rc::Rc::new(std::cell::Cell::new(false));
+    let (base, base_refs) =
+        crate::ui::bases::build_base(&dispatcher, &split_view, &compact_navigation);
+    routes.add_named(&base, Some("base"));
+    routes.set_visible_child_name("browser");
     let runtime = AppRuntime::new(
         client.clone(),
         AppModel::new(&carver_config::Config::default()),
-        crate::view::ViewRefs::new(routes, adw::StatusPage::new(), adw::StatusPage::new()),
+        crate::view::ViewRefs::new(
+            routes.clone(),
+            adw::StatusPage::new(),
+            adw::StatusPage::new(),
+        )
+        .with_dispatcher(dispatcher.clone())
+        .with_base(base_refs),
     );
     runtime.bind_dispatcher(&dispatcher);
     let button = crate::ui::add::button(&dispatcher);
@@ -22,7 +39,10 @@ pub(super) fn add_dialog_should_create_and_preserve_drafts() -> TestResult {
     button.set_valign(gtk::Align::Start);
     let window = adw::Window::new();
     window.set_default_size(360, 640);
-    window.set_content(Some(&button));
+    let window_content = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    window_content.append(&routes);
+    window_content.append(&button);
+    window.set_content(Some(&window_content));
     window.present();
     assert!(run_main_context_until(|| button.is_mapped()));
     button.emit_clicked();
@@ -31,7 +51,11 @@ pub(super) fn add_dialog_should_create_and_preserve_drafts() -> TestResult {
     assert!(run_main_context_until(
         || dialog.width() > 0 && dialog.height() > 250
     ));
-    assert!(dialog.width() <= 360, "dialog width: {}", dialog.width());
+    assert!(
+        dialog.width() >= 360,
+        "chooser should keep enough room for its explanatory cards: {}",
+        dialog.width()
+    );
     capture_dialog(&dialog, "chooser")?;
     let pages = widget_as::<gtk::Stack>(root, "add-pages").ok_or("pages")?;
     assert_eq!(pages.visible_child_name().as_deref(), Some("choose"));
@@ -47,14 +71,6 @@ pub(super) fn add_dialog_should_create_and_preserve_drafts() -> TestResult {
         .ok_or("book icon")?
         .set_active(true);
     widget_as::<gtk::Button>(root, "add-category-back")
-        .ok_or("back")?
-        .emit_clicked();
-    widget_as::<gtk::Button>(root, "add-base-choice")
-        .ok_or("base choice")?
-        .emit_clicked();
-    let base_entry = widget_as::<gtk::Entry>(root, "base-name-entry").ok_or("base name")?;
-    base_entry.set_text("Reading list");
-    widget_as::<gtk::Button>(root, "add-base-back")
         .ok_or("back")?
         .emit_clicked();
     widget_as::<gtk::Button>(root, "add-category-choice")
@@ -76,33 +92,86 @@ pub(super) fn add_dialog_should_create_and_preserve_drafts() -> TestResult {
     let root = dialog.upcast_ref();
     let pages = widget_as::<gtk::Stack>(root, "add-pages").ok_or("fresh pages")?;
     assert_eq!(pages.visible_child_name().as_deref(), Some("choose"));
-    let entry = widget_as::<gtk::Entry>(root, "base-name-entry").ok_or("fresh entry")?;
-    assert!(entry.text().is_empty());
     widget_as::<gtk::Button>(root, "add-base-choice")
         .ok_or("base choice")?
         .emit_clicked();
+    assert!(
+        run_main_context_until(|| {
+            window.visible_dialog().is_some_and(|dialog| {
+                dialog.widget_name() == "base-configuration-dialog" && dialog.is_mapped()
+            })
+        }),
+        "visible dialog: {:?}; model: {:?}",
+        window.visible_dialog().map(|dialog| (
+            dialog.widget_name().clone(),
+            dialog.title().clone(),
+            dialog.is_mapped(),
+        )),
+        runtime.model().notice,
+    );
+    let dialog = window.visible_dialog().ok_or("new Base configuration")?;
+    let root = dialog.upcast_ref();
+    assert!(widget_as::<gtk::Expander>(root, "base-visible-fields-section").is_some());
+    assert!(widget_as::<gtk::Expander>(root, "base-filters-section").is_some());
+    assert!(widget_as::<gtk::Expander>(root, "base-sort-section").is_some());
+    let entry = widget_as::<gtk::Entry>(root, "base-configuration-name").ok_or("new Base name")?;
+    assert!(entry.text().is_empty());
     entry.set_text("  Reading list  ");
-    entry.emit_activate();
+    widget_as::<gtk::Button>(root, "base-configuration-save")
+        .ok_or("create Base")?
+        .emit_clicked();
     assert!(run_main_context_until(
         || matches!(&runtime.model().bases.definitions.state,
         crate::mvu::LoadState::Ready(items) if items.len() == 1 && items[0].name == "Reading list")
     ));
+    assert!(run_main_context_until(|| window.visible_dialog().is_none()));
     button.emit_clicked();
     let dialog = window.visible_dialog().ok_or("dialog")?;
     let root = dialog.upcast_ref();
-    widget_as::<gtk::Entry>(root, "base-name-entry")
-        .ok_or("entry")?
-        .set_text("Discard");
+    widget_as::<gtk::Button>(root, "add-base-choice")
+        .ok_or("base choice")?
+        .emit_clicked();
+    assert!(run_main_context_until(|| {
+        window.visible_dialog().is_some_and(|dialog| {
+            dialog.widget_name() == "base-configuration-dialog" && dialog.is_mapped()
+        })
+    }));
+    let dialog = window.visible_dialog().ok_or("duplicate configuration")?;
+    let root = dialog.upcast_ref();
+    let duplicate_name =
+        widget_as::<gtk::Entry>(root, "base-configuration-name").ok_or("new Base name")?;
+    duplicate_name.set_text("Reading list");
+    widget_as::<gtk::Button>(root, "base-configuration-save")
+        .ok_or("create duplicate Base")?
+        .emit_clicked();
+    assert!(run_main_context_until(|| runtime.model().notice.is_some()));
+    assert!(dialog.can_close());
+    assert!(
+        dialog
+            .child()
+            .ok_or("preserved duplicate Base draft")?
+            .is_sensitive()
+    );
+    assert_eq!(duplicate_name.text(), "Reading list");
     dialog.close();
     button.emit_clicked();
     let dialog = window.visible_dialog().ok_or("dialog")?;
-    let root = dialog.upcast_ref();
+    widget_as::<gtk::Button>(dialog.upcast_ref(), "add-base-choice")
+        .ok_or("base choice")?
+        .emit_clicked();
+    assert!(run_main_context_until(|| {
+        window.visible_dialog().is_some_and(|dialog| {
+            dialog.widget_name() == "base-configuration-dialog" && dialog.is_mapped()
+        })
+    }));
+    let dialog = window.visible_dialog().ok_or("fresh Base configuration")?;
     assert!(
-        widget_as::<gtk::Entry>(root, "base-name-entry")
-            .ok_or("reset entry")?
+        widget_as::<gtk::Entry>(dialog.upcast_ref(), "base-configuration-name")
+            .ok_or("reset new Base name")?
             .text()
             .is_empty()
     );
+    dialog.close();
     window.close();
     Ok(())
 }
@@ -125,21 +194,12 @@ pub(super) fn add_dialog_should_resize_for_the_active_form() -> TestResult {
     assert!(!pages.is_vhomogeneous());
     assert!(run_main_context_until(|| dialog.height() > 250));
     capture_dialog(&dialog, "chooser-desktop")?;
-    widget_as::<gtk::Button>(root, "add-base-choice")
-        .ok_or("base choice")?
-        .emit_clicked();
-    assert!(run_main_context_until(|| !pages.is_transition_running()));
-    let content = dialog.child().ok_or("dialog content")?;
-    assert!(run_main_context_until(|| content.height() < 300));
-    let base_height = content.height();
-    widget_as::<gtk::Button>(root, "add-base-back")
-        .ok_or("back")?
-        .emit_clicked();
     widget_as::<gtk::Button>(root, "add-category-choice")
         .ok_or("category choice")?
         .emit_clicked();
+    let content = dialog.child().ok_or("dialog content")?;
     assert!(run_main_context_until(
-        || !pages.is_transition_running() && content.height() > base_height
+        || !pages.is_transition_running() && content.height() > 300
     ));
     let scroll = pages
         .parent()
