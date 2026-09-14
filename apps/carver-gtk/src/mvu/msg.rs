@@ -5,6 +5,7 @@ use std::ops::Range;
 use carver_config::{DocumentWidth, EditorMode, SourceSyntaxStyle};
 use carver_editor_protocol::EditorCommand;
 use carver_sdk::{
+    BaseColumn, BaseDefinition, BaseFilter, BaseFilterMode, BaseId, BaseRow, BaseSort,
     CategoryAppearance, CategoryId, CategorySummary, DocumentImportFormat, LibraryRevision, NoteId,
     NoteSummary, Revision, TrashContents, TrashPurgeResult,
 };
@@ -65,6 +66,85 @@ pub enum AppMsg {
     LibraryChangedExternally,
     /// Completion from an effect that accessed the library.
     Library(LibraryReply),
+    /// Saved database-style view intent.
+    Bases(BasesMsg),
+}
+
+/// Events for saved database-style views.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BasesMsg {
+    /// Open Base search from the Base header or a keyboard shortcut.
+    SearchShortcutRequested,
+    /// Reveal the Base search controls and focus their entry.
+    SearchOpened,
+    /// Synchronize visibility changes made by the native Base search bar.
+    SearchVisibilityChanged(bool),
+    /// Replace the user-entered Base search text.
+    SearchChanged(String),
+    /// A delayed Base search timer fired.
+    SearchTimerFired(TimerId),
+    /// Replace the saved ordering selected through the native Base table headers.
+    SetSorts {
+        /// Ordered rules selected by the header sorter.
+        sorts: Vec<BaseSort>,
+    },
+    /// Open the configuration dialog for the selected Base.
+    Configure,
+    /// Prepare the shared configuration dialog for a new Base.
+    ConfigureNew,
+    /// Delete a saved Base after user confirmation; notes are retained.
+    Delete(BaseId),
+    /// Show loading feedback only if this request is still pending.
+    LoadingIndicatorElapsed(RequestId),
+    /// Open and load a saved base.
+    Open(BaseId),
+    /// Create a Base with its complete configuration chosen before persistence.
+    CreateConfigured {
+        /// User-visible view name.
+        name: String,
+        /// Ordered visible columns.
+        columns: Vec<BaseColumn>,
+        /// Filter combination mode.
+        filter_mode: BaseFilterMode,
+        /// Visual filters.
+        filters: Vec<BaseFilter>,
+        /// Ordered sort rules.
+        sorts: Vec<BaseSort>,
+    },
+    /// Save a complete Base configuration guarded by its revision.
+    Update {
+        /// Definition identity.
+        base_id: BaseId,
+        /// Revision read when the editor opened.
+        revision: Revision,
+        /// User-visible name.
+        name: String,
+        /// Ordered visible columns.
+        columns: Vec<BaseColumn>,
+        /// Filter combination mode.
+        filter_mode: BaseFilterMode,
+        /// Visual filters.
+        filters: Vec<BaseFilter>,
+        /// Ordered sort rules.
+        sorts: Vec<BaseSort>,
+    },
+    /// Reload saved definitions.
+    Reload,
+    /// Recount notes matching the filters currently drafted in the configuration dialog.
+    PreviewCount {
+        /// Identity of the dialog that owns the draft.
+        dialog_id: RequestId,
+        /// Filter combination mode.
+        filter_mode: BaseFilterMode,
+        /// Draft filters.
+        filters: Vec<BaseFilter>,
+    },
+    /// The debounce timer for a configuration preview elapsed.
+    PreviewCountTimerFired(TimerId),
+    /// A native configuration dialog was dismissed.
+    ConfigurationDismissed(RequestId),
+    /// Request the next page for the visible Base.
+    LoadMoreRows,
 }
 
 /// Messages that change the high-level visible surface.
@@ -93,6 +173,8 @@ pub enum NavigationMsg {
     ShowTrash,
     /// Return to the browser surface.
     ShowBrowser,
+    /// Open search for the active top-level surface.
+    SearchShortcutRequested,
 }
 
 /// Browser events.
@@ -100,6 +182,8 @@ pub enum NavigationMsg {
 pub enum BrowserMsg {
     /// Reload the current browser query and category.
     Reload,
+    /// Request the next page for the current query and category.
+    LoadMore,
     /// Open note search when a browser or sidebar shortcut is received on the browser route.
     SearchShortcutRequested,
     /// Reveal the notes search controls and focus their entry.
@@ -527,6 +611,80 @@ impl ActionMsg {
 /// Values returned by asynchronous library effects.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LibraryReply {
+    /// A confirmed Base deletion completed.
+    BaseDeleted {
+        /// Deleted definition identity.
+        base_id: BaseId,
+        /// Completion or displayable failure.
+        result: Result<(), UiError>,
+    },
+    /// Saved base definitions completed loading.
+    BasesLoaded {
+        /// Identity of the initiating request.
+        request_id: RequestId,
+        /// Saved definitions or a displayable failure.
+        result: Result<Vec<BaseDefinition>, UiError>,
+    },
+    /// The active-note frontmatter property descriptors completed loading.
+    PropertyDescriptorsLoaded {
+        /// Identity of the initiating request.
+        request_id: RequestId,
+        /// Typed descriptors or a displayable failure.
+        result: Result<Vec<carver_sdk::PropertyDescriptor>, UiError>,
+    },
+    /// Rows for the selected base completed loading.
+    BaseRowsLoaded {
+        /// Identity of the initiating request.
+        request_id: RequestId,
+        /// Queried saved view.
+        base_id: BaseId,
+        /// Projected rows or a displayable failure.
+        result: Result<carver_sdk::Page<BaseRow>, UiError>,
+    },
+    /// One additional page for the selected Base completed loading.
+    BaseRowsAppended {
+        /// Identity of the initiating request.
+        request_id: RequestId,
+        /// Queried saved view.
+        base_id: BaseId,
+        /// Projected page or a displayable failure.
+        result: Result<carver_sdk::Page<BaseRow>, UiError>,
+    },
+    /// A base creation completed.
+    BaseCreated {
+        /// Created definition or a displayable failure.
+        result: Result<BaseDefinition, UiError>,
+    },
+    /// A Base configuration save completed.
+    BaseUpdated {
+        /// Updated definition or a displayable failure.
+        result: Result<BaseDefinition, UiError>,
+    },
+    /// Configuration prerequisites finished loading.
+    BaseConfigurationLoaded {
+        /// Request identity.
+        request_id: RequestId,
+        /// Configuration captured when the user requested the dialog.
+        definition: BaseDefinition,
+        /// Completion or displayable failure.
+        result: Result<(), UiError>,
+    },
+    /// Configuration prerequisites for a new Base finished loading.
+    NewBaseConfigurationLoaded {
+        /// Request identity.
+        request_id: RequestId,
+        /// Completion or displayable failure.
+        result: Result<(), UiError>,
+    },
+    /// A configuration preview count completed.
+    BasePreviewCount {
+        /// Identity of the configuration dialog that requested this count.
+        dialog_id: RequestId,
+        /// Identity of the initiating request.
+        request_id: RequestId,
+        /// Count or a displayable failure.
+        result: Result<usize, UiError>,
+    },
     /// A semantic library revision completed loading.
     LibraryRevisionLoaded {
         /// Identity of the initiating request.
@@ -568,9 +726,16 @@ pub enum LibraryReply {
         /// Identity of the initiating request.
         request_id: RequestId,
         /// Successful result or a displayable failure.
-        result: Result<Vec<NoteSummary>, UiError>,
+        result: Result<carver_sdk::Page<NoteSummary>, UiError>,
         /// Favorites loaded with the same category; empty for searches.
         favorites: Result<Vec<NoteSummary>, UiError>,
+    },
+    /// One additional browser page completed loading.
+    BrowserAppended {
+        /// Identity of the initiating request.
+        request_id: RequestId,
+        /// Summaries or a displayable failure.
+        result: Result<carver_sdk::Page<NoteSummary>, UiError>,
     },
     /// A favorite-state mutation completed with its updated note revision.
     FavoriteChanged {

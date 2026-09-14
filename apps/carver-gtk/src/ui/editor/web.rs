@@ -35,6 +35,8 @@ pub(crate) struct RichEditor {
     navigation_epoch: Rc<Cell<u64>>,
     canonical_source: Rc<RefCell<Rc<str>>>,
     pending_source: Rc<RefCell<Option<(u64, String)>>>,
+    pending_focus: Rc<Cell<Option<u64>>>,
+    loaded_session: Rc<Cell<Option<u64>>>,
     current_theme: Rc<RefCell<Option<EditorTheme>>>,
     current_appearance: Rc<RefCell<Option<DocumentAppearance>>>,
     unsupported_handler: UnsupportedHandler,
@@ -93,6 +95,8 @@ impl RichEditor {
             navigation_epoch: Rc::new(Cell::new(0)),
             canonical_source: Rc::new(RefCell::new(Rc::from(""))),
             pending_source: Rc::new(RefCell::new(None)),
+            pending_focus: Rc::new(Cell::new(None)),
+            loaded_session: Rc::new(Cell::new(None)),
             current_theme: Rc::new(RefCell::new(None)),
             current_appearance: Rc::new(RefCell::new(None)),
             unsupported_handler: Rc::new(RefCell::new(None)),
@@ -128,6 +132,7 @@ impl RichEditor {
         self.session.set(next_session);
         self.revision.set(0);
         self.navigation_epoch.set(0);
+        self.loaded_session.set(None);
         self.canonical_source.replace(Rc::from(source));
         self.pending_source
             .replace(Some((next_session, source.to_owned())));
@@ -172,6 +177,25 @@ impl RichEditor {
             json(name),
             argument
         ));
+    }
+
+    /// Focuses the rich-text document at its insertion point.
+    pub(crate) fn focus(&self) {
+        self.view.grab_focus();
+        self.pending_focus.set(Some(self.session.get()));
+        self.focus_pending();
+    }
+
+    fn focus_pending(&self) {
+        let session = self.session.get();
+        if self.pending_focus.get() != Some(session) {
+            return;
+        }
+        if !self.ready.get() || self.loaded_session.get() != Some(session) {
+            return;
+        }
+        self.pending_focus.set(None);
+        self.evaluate("window.carverEditor.focus();");
     }
 
     /// Focuses a document occurrence without changing its source.
@@ -264,6 +288,8 @@ impl RichEditor {
             && selection.navigation_epoch == self.navigation_epoch.get()
     }
 
+    // CONTEXT: WebKit bridge events share the same session validation and must remain together.
+    #[expect(clippy::too_many_lines)]
     fn connect_messages(
         &self,
         manager: &webkit6::UserContentManager,
@@ -347,6 +373,8 @@ impl RichEditor {
                     session,
                     state: selection,
                 } if editor.accepts_selection(session, &selection) => {
+                    editor.loaded_session.set(Some(session));
+                    editor.focus_pending();
                     if let Some(session) = editor.document_session.get() {
                         let source = Rc::clone(&editor.canonical_source.borrow());
                         let _ = dispatcher.dispatch(AppMsg::Editor(

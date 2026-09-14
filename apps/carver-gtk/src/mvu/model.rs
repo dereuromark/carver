@@ -120,24 +120,116 @@ impl<T> Resource<T> {
 }
 
 /// The currently visible high-level application surface.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum Route {
     /// The category browser and note list.
     #[default]
     Browser,
+    /// A saved database-style note view.
+    Base,
     /// The recovery and permanent-deletion surface.
     Trash,
     /// The active note editor.
     Editor,
 }
 
-/// A browser selection waiting for an active editor to finish closing.
+/// A Base configuration dialog waiting for the library-wide field catalog.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum PendingBaseConfiguration {
+    /// Configure a new, not-yet-persisted Base.
+    New,
+    /// Configure an existing saved Base definition.
+    Existing(carver_sdk::BaseDefinition),
+}
+
+/// Saved bases and the currently visible grid.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct BasesModel {
+    /// Whether the native Base search bar is currently shown.
+    pub search_open: bool,
+    /// Current untrimmed Base search text as entered by the user.
+    pub search_query: String,
+    /// The debounce timer authorized to reload after the latest Base search change.
+    pub search_timer: Option<TimerId>,
+    /// Latest configuration snapshot request.
+    pub configuration_request: Option<RequestId>,
+    /// Dialog intent retained until the field catalog becomes ready.
+    pub(crate) pending_configuration: Option<PendingBaseConfiguration>,
+    /// Identity of the configuration dialog currently presented by the GTK adapter.
+    pub configuration_dialog: Option<RequestId>,
+    /// Latest configuration preview-count request.
+    pub configuration_preview_request: Option<(RequestId, RequestId)>,
+    /// Debounce timer for the latest configuration preview draft.
+    pub configuration_preview_timer: Option<TimerId>,
+    /// Draft retained until its preview debounce timer elapses.
+    pub configuration_preview_draft: Option<(
+        RequestId,
+        carver_sdk::BaseFilterMode,
+        Vec<carver_sdk::BaseFilter>,
+    )>,
+    /// Whether a configuration update is pending.
+    pub saving_configuration: bool,
+    /// Base deletions currently in flight.
+    pub deleting: BTreeSet<carver_sdk::BaseId>,
+    /// Definition request whose loading-indicator delay has elapsed.
+    pub definitions_loading_elapsed: Option<RequestId>,
+    /// Row request whose loading-indicator delay has elapsed.
+    pub rows_loading_elapsed: Option<RequestId>,
+    /// Saved definitions rendered in the sidebar.
+    pub definitions: Resource<Vec<carver_sdk::BaseDefinition>>,
+    /// Selected definition.
+    pub selected: Option<carver_sdk::BaseId>,
+    /// Rows of the selected definition.
+    pub rows: Resource<Vec<carver_sdk::BaseRow>>,
+    /// Offset for the next Base row page.
+    pub rows_next_offset: usize,
+    /// Whether another Base row page is available.
+    pub rows_has_more: bool,
+    /// Incremental Base row request currently in flight.
+    pub rows_append_request: Option<RequestId>,
+    /// Recoverable failure while loading another Base row page.
+    pub rows_append_error: Option<UiError>,
+    /// Typed frontmatter properties currently present in active notes.
+    pub property_descriptors: Resource<Vec<carver_sdk::PropertyDescriptor>>,
+}
+
+/// The single navigation destination highlighted in the sidebar.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum PendingCategorySelection {
-    /// Show notes from every active category.
-    AllNotes,
-    /// Show notes from one category.
-    Category(CategoryId),
+pub enum SidebarSelection {
+    /// All notes (`None`) or one category.
+    Category(Option<CategoryId>),
+    /// One saved Base.
+    Base(carver_sdk::BaseId),
+    /// No category or Base is active (for example, Trash).
+    None,
+}
+
+impl AppModel {
+    /// Derives sidebar selection from navigation, preserving an editor's origin.
+    pub fn sidebar_selection(&self) -> SidebarSelection {
+        let route = if self.route == Route::Editor {
+            self.editor_return_route
+        } else {
+            self.route
+        };
+        match route {
+            Route::Base => self
+                .bases
+                .selected
+                .map_or(SidebarSelection::None, SidebarSelection::Base),
+            Route::Browser => SidebarSelection::Category(self.selected_category),
+            _ => SidebarSelection::None,
+        }
+    }
+}
+
+/// A destination waiting for an active editor to finish closing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PendingNavigation {
+    /// Show the browser, optionally scoped to one category.
+    Browser(Option<CategoryId>),
+    /// Show one saved base.
+    Base(carver_sdk::BaseId),
 }
 
 /// Browser-specific UI-neutral state.
@@ -149,6 +241,14 @@ pub struct BrowserModel {
     pub search_query: String,
     /// Loaded note summaries for the active category and query.
     pub notes: Resource<Vec<NoteSummary>>,
+    /// Offset for the next browser result page.
+    pub next_offset: usize,
+    /// Whether another browser result page is available.
+    pub has_more: bool,
+    /// Incremental browser request currently in flight.
+    pub append_request: Option<RequestId>,
+    /// Recoverable failure while loading another browser page.
+    pub append_error: Option<UiError>,
     /// Favorite notes rendered above the All Notes feed.
     pub favorites: Resource<Vec<NoteSummary>>,
     /// Most recent successful note list, retained while a replacement request loads.
@@ -529,14 +629,18 @@ pub struct AppModel {
     pub config: Config,
     /// Current high-level surface.
     pub route: Route,
+    /// Surface restored after the current editor session closes.
+    pub(crate) editor_return_route: Route,
     /// Category selected by the user, or all categories when absent.
     pub selected_category: Option<CategoryId>,
-    /// Category to select once a pending editor close has safely completed.
-    pub(crate) pending_category_selection: Option<PendingCategorySelection>,
+    /// Destination to show once a pending editor close has safely completed.
+    pub(crate) pending_navigation: Option<PendingNavigation>,
     /// Categories rendered by the sidebar.
     pub sidebar: Resource<Vec<CategorySummary>>,
     /// Browser state and its loaded note summaries.
     pub browser: BrowserModel,
+    /// Saved database-style views.
+    pub bases: BasesModel,
     /// Recoverable deleted content.
     pub trash: Resource<TrashContents>,
     /// The most recent mutation error for the view to surface.
@@ -591,10 +695,12 @@ impl AppModel {
         Self {
             config: config.clone(),
             route: Route::Browser,
+            editor_return_route: Route::Browser,
             selected_category: None,
-            pending_category_selection: None,
+            pending_navigation: None,
             sidebar: Resource::default(),
             browser: BrowserModel::default(),
+            bases: BasesModel::default(),
             trash: Resource::default(),
             notice: None,
             pending_actions: BTreeSet::new(),
