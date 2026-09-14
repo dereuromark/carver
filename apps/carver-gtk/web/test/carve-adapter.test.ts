@@ -65,7 +65,7 @@ describe('Carve adapter', () => {
     expect(serializeToCarve(result.doc)).toBe(source);
   });
 
-  it('preserves inline payloads through the structured editor nodes', () => {
+  it('exposes inline payloads as directly editable text content', () => {
     const source =
       'Keep {% review this %}, !`literal`, and `<b>`{=html} editable.';
     const result = carveToProseMirrorWithReport(source, {
@@ -73,19 +73,15 @@ describe('Carve adapter', () => {
     });
     const inline = result.doc.content?.[0]?.content ?? [];
 
-    expect(inline).toEqual(
-      expect.arrayContaining([
-        {
-          type: 'carveCommentInline',
-          attrs: { content: 'review this', delimited: true },
-        },
-        { type: 'carveLiteral', attrs: { content: 'literal' } },
-        {
-          type: 'carveRawInline',
-          attrs: { content: '<b>', format: 'html' },
-        },
-      ]),
-    );
+    for (const type of [
+      'carveCommentInline',
+      'carveLiteral',
+      'carveRawInline',
+    ]) {
+      const node = inline.find((candidate) => candidate.type === type);
+      expect(node?.content?.[0]?.type).toBe('text');
+      expect(node?.attrs?.content).toBeUndefined();
+    }
     expect(serializeToCarve(result.doc)).toBe(source);
   });
 
