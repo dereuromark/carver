@@ -8,8 +8,9 @@ use async_channel::{Receiver, Sender};
 use carver_config::{AppPaths, ConfigError};
 pub use carver_domain::{
     Category, CategoryAppearance, CategoryColor, CategoryIcon, CategoryId, CategorySummary,
-    DocumentImportFormat, Note, NoteId, NoteSummary, Revision, SearchHit, TrashContents,
-    TrashPurgeResult, TrashedCategorySummary, TrashedNoteSummary,
+    DocumentImportDiagnostic, DocumentImportFormat, DocumentImportReport, DocumentImportResult,
+    Note, NoteId, NoteSummary, Revision, SearchHit, TrashContents, TrashPurgeResult,
+    TrashedCategorySummary, TrashedNoteSummary, assess_import,
 };
 pub use carver_library_port::{LibraryBackend, LibraryRevision};
 use carver_storage_sqlite::{SqliteLibrary, StorageError};
