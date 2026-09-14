@@ -2,7 +2,10 @@
 
 use carver_config::Config;
 use carver_editor_protocol::EditorCommand;
-use carver_sdk::{CategoryAppearance, CategoryId, DocumentImportFormat, NoteId, Revision};
+use carver_sdk::{
+    BaseColumn, BaseFilter, BaseFilterMode, BaseId, BaseSort, CategoryAppearance, CategoryId,
+    DocumentImportFormat, NoteId, Revision,
+};
 
 use super::{
     ActionKey, EditorCopyRequest, EditorExportDialogRequest, EditorExportFormat,
@@ -13,6 +16,122 @@ use super::{
 /// Work that the runtime performs after rendering an updated model.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Effect {
+    /// Prepare an unfiltered snapshot for a configuration dialog.
+    PrepareBaseConfiguration {
+        /// Request identity used to reject stale completions.
+        request_id: RequestId,
+        /// Saved configuration to edit.
+        definition: carver_sdk::BaseDefinition,
+    },
+    /// Prepare the shared Base configuration dialog before creating a Base.
+    PrepareNewBaseConfiguration {
+        /// Request identity used to reject stale completions.
+        request_id: RequestId,
+    },
+    /// Present the prepared Base configuration through the GTK adapter.
+    ShowBaseConfiguration {
+        /// Identity of the presented dialog session.
+        dialog_id: RequestId,
+        /// Saved configuration to edit.
+        definition: carver_sdk::BaseDefinition,
+        /// Library-wide field catalog.
+        descriptors: Vec<carver_sdk::PropertyDescriptor>,
+    },
+    /// Present the shared Base configuration dialog in create mode.
+    ShowNewBaseConfiguration {
+        /// Identity of the presented dialog session.
+        dialog_id: RequestId,
+        /// Library-wide field catalog.
+        descriptors: Vec<carver_sdk::PropertyDescriptor>,
+    },
+    /// Count rows matching draft Base filters without loading their projections.
+    PreviewBaseRowCount {
+        /// Identity of the configuration dialog that requested this count.
+        dialog_id: RequestId,
+        /// Identity for stale-completion protection.
+        request_id: RequestId,
+        /// Filter combination mode.
+        filter_mode: BaseFilterMode,
+        /// Draft filters.
+        filters: Vec<BaseFilter>,
+    },
+    /// Update the open configuration dialog's preview label.
+    UpdateBaseConfigurationPreview {
+        /// Identity of the configuration dialog receiving this count.
+        dialog_id: RequestId,
+        /// Current matching-note count.
+        count: usize,
+    },
+    /// Complete a configuration save without discarding a failed draft.
+    FinishBaseConfiguration {
+        /// Whether persistence succeeded.
+        success: bool,
+    },
+    /// Delete only a saved Base definition, preserving its notes.
+    DeleteBase {
+        /// Definition to remove.
+        base_id: BaseId,
+    },
+    /// Load saved base definitions.
+    LoadBases {
+        /// Identity for stale-completion protection.
+        request_id: RequestId,
+    },
+    /// Load the library-wide frontmatter property descriptors used by Base configuration.
+    LoadPropertyDescriptors {
+        /// Identity for stale-completion protection.
+        request_id: RequestId,
+    },
+    /// Load rows for one saved base.
+    LoadBaseRows {
+        /// Identity for stale-completion protection.
+        request_id: RequestId,
+        /// Saved view to query.
+        base_id: BaseId,
+        /// Optional full-text search input for the Base's title and body.
+        query: String,
+    },
+    /// Load one additional page for a visible Base.
+    LoadMoreBaseRows {
+        /// Identity for stale-completion protection.
+        request_id: RequestId,
+        /// Saved view to query.
+        base_id: BaseId,
+        /// Full-text search input for the Base's title and body.
+        query: String,
+        /// Starting position of the requested page.
+        offset: usize,
+    },
+    /// Create a saved Base with its complete initial configuration.
+    CreateConfiguredBase {
+        /// User-visible view name.
+        name: String,
+        /// Ordered visible columns.
+        columns: Vec<BaseColumn>,
+        /// Filter combination mode.
+        filter_mode: BaseFilterMode,
+        /// Visual filters.
+        filters: Vec<BaseFilter>,
+        /// Ordered sort rules.
+        sorts: Vec<BaseSort>,
+    },
+    /// Save a complete Base configuration.
+    UpdateBase {
+        /// Definition identity.
+        base_id: BaseId,
+        /// Revision read when the editor opened.
+        revision: Revision,
+        /// User-visible name.
+        name: String,
+        /// Ordered visible columns.
+        columns: Vec<BaseColumn>,
+        /// Filter combination mode.
+        filter_mode: BaseFilterMode,
+        /// Visual filters.
+        filters: Vec<BaseFilter>,
+        /// Ordered sort rules.
+        sorts: Vec<BaseSort>,
+    },
     /// Read and store native files sequentially with a bounded per-file read.
     ImportEditorFiles {
         /// Initiating document and source position.
@@ -59,6 +178,11 @@ pub enum Effect {
         session: EditorSessionId,
         /// Character-based selection in the canonical source.
         selection: std::ops::Range<usize>,
+    },
+    /// Focus the editable surface after opening a note.
+    FocusEditor {
+        /// Editor lifetime that must still be active when focus is applied.
+        session: EditorSessionId,
     },
     /// Resolve a managed asset through the asynchronous SDK boundary.
     LoadMediaFile {
@@ -126,6 +250,16 @@ pub enum Effect {
     /// Wait before dispatching the current search timer identity.
     ScheduleSearch {
         /// Identity used to ignore a superseded debounce timer.
+        timer_id: TimerId,
+    },
+    /// Wait before dispatching the current Base search timer identity.
+    ScheduleBaseSearch {
+        /// Identity used to ignore a superseded debounce timer.
+        timer_id: TimerId,
+    },
+    /// Wait before counting notes for the latest Base configuration draft.
+    ScheduleBasePreview {
+        /// Identity used to ignore a superseded preview debounce timer.
         timer_id: TimerId,
     },
     /// Wait before attempting to persist the latest editor source.
@@ -215,6 +349,17 @@ pub enum Effect {
         category_id: Option<CategoryId>,
         /// Search input to apply.
         query: String,
+    },
+    /// Load one additional page for the current browser query.
+    LoadMoreBrowser {
+        /// Identity for stale-completion protection.
+        request_id: RequestId,
+        /// Category to restrict the listing to, if any.
+        category_id: Option<CategoryId>,
+        /// Search input to apply.
+        query: String,
+        /// Starting position of the requested page.
+        offset: usize,
     },
     /// Load a complete note before showing it in the editor.
     LoadEditorNote {

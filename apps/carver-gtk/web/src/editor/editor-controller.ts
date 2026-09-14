@@ -164,6 +164,14 @@ export class EditorController implements RichEditorApi {
     return true;
   }
 
+  /** Focuses the current document's native editable surface. */
+  public focus(): boolean {
+    const editor = this.editor;
+    if (!editor) return false;
+    editor.view.dom.focus({ preventScroll: true });
+    return document.activeElement === editor.view.dom;
+  }
+
   public command(name: string, argument?: unknown): boolean {
     const editor = this.currentEditor();
     const chain = editor.chain().focus();

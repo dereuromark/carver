@@ -17,18 +17,24 @@ fn startup_should_initialize_then_request_sidebar_and_browser_data() {
             Effect::LoadSidebar {
                 request_id: RequestId(1),
             },
+            Effect::LoadBases {
+                request_id: RequestId(2)
+            },
+            Effect::LoadPropertyDescriptors {
+                request_id: RequestId(3)
+            },
             Effect::LoadBrowser {
-                request_id: RequestId(2),
+                request_id: RequestId(4),
                 category_id: None,
                 query: String::new(),
             },
             Effect::LoadLibraryRevision {
-                request_id: RequestId(3),
+                request_id: RequestId(5),
             },
         ]
     );
     assert_eq!(model.sidebar.state, LoadState::Loading(RequestId(1)));
-    assert_eq!(model.browser.notes.state, LoadState::Loading(RequestId(2)));
+    assert_eq!(model.browser.notes.state, LoadState::Loading(RequestId(4)));
 }
 
 #[test]
@@ -57,13 +63,19 @@ fn external_library_change_should_reload_visible_resources_after_the_revision_ch
             Effect::LoadSidebar {
                 request_id: RequestId(2),
             },
+            Effect::LoadBases {
+                request_id: RequestId(3)
+            },
+            Effect::LoadPropertyDescriptors {
+                request_id: RequestId(4)
+            },
             Effect::LoadBrowser {
-                request_id: RequestId(3),
+                request_id: RequestId(5),
                 category_id: None,
                 query: String::new(),
             },
             Effect::LoadTrash {
-                request_id: RequestId(4),
+                request_id: RequestId(6),
             },
         ]
     );
@@ -95,6 +107,78 @@ fn new_note_should_create_in_the_selected_category() {
     assert_eq!(
         update(&mut model, AppMsg::Navigation(NavigationMsg::CreateNote)),
         vec![Effect::CreateNote { category_id }]
+    );
+}
+
+#[test]
+fn created_note_should_request_editor_focus() {
+    let mut model = AppModel::new(&Config::default());
+    let category_id = CategoryId::new();
+    let note = Note {
+        id: NoteId::new(),
+        category_id,
+        source: String::new(),
+        title: String::new(),
+        plain_text: String::new(),
+        revision: Revision(1),
+        is_favorite: false,
+        created_at: OffsetDateTime::UNIX_EPOCH,
+        updated_at: OffsetDateTime::UNIX_EPOCH,
+        trashed_at: None,
+    };
+
+    let effects = update(
+        &mut model,
+        AppMsg::Library(LibraryReply::NoteCreated { result: Ok(note) }),
+    );
+
+    assert_eq!(
+        effects.first(),
+        Some(&Effect::FocusEditor {
+            session: EditorSessionId(1)
+        })
+    );
+}
+
+#[test]
+fn opened_note_should_request_editor_focus() {
+    let mut model = AppModel::new(&Config::default());
+    let note_id = NoteId::new();
+    let category_id = CategoryId::new();
+    let request_id = match update(
+        &mut model,
+        AppMsg::Navigation(NavigationMsg::OpenNote(note_id)),
+    )
+    .as_slice()
+    {
+        [Effect::LoadEditorNote { request_id, .. }] => *request_id,
+        _ => panic!("opening a note should load it"),
+    };
+
+    let effects = update(
+        &mut model,
+        AppMsg::Library(LibraryReply::EditorLoaded {
+            request_id,
+            result: Ok(Note {
+                id: note_id,
+                category_id,
+                source: String::from("Existing note content"),
+                title: String::from("Existing note content"),
+                plain_text: String::from("Existing note content"),
+                revision: Revision(1),
+                is_favorite: false,
+                created_at: OffsetDateTime::UNIX_EPOCH,
+                updated_at: OffsetDateTime::UNIX_EPOCH,
+                trashed_at: None,
+            }),
+        }),
+    );
+
+    assert_eq!(
+        effects,
+        vec![Effect::FocusEditor {
+            session: EditorSessionId(1)
+        }]
     );
 }
 

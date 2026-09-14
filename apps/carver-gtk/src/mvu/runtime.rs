@@ -9,7 +9,7 @@ use std::{
     rc::{Rc, Weak},
 };
 
-use carver_sdk::{LibraryBackend, LibraryClient};
+use carver_sdk::{LibraryBackend, LibraryClient, PageRequest};
 use carver_storage_sqlite::change_notification_files;
 use gtk::gio::{
     self, FileMonitor, FileMonitorEvent,
@@ -29,7 +29,8 @@ mod media_preview;
 type DispatchCallback = Rc<dyn Fn(AppMsg) -> bool>;
 type PreviewCopies = BTreeMap<(carver_sdk::NoteId, String), (tempfile::TempDir, PathBuf)>;
 
-const BROWSER_LOADING_INDICATOR_DELAY: std::time::Duration = std::time::Duration::from_millis(150);
+const LOADING_INDICATOR_DELAY: std::time::Duration = std::time::Duration::from_millis(150);
+const RESULT_PAGE_SIZE: usize = 100;
 
 /// A weak, window-local route for GTK/WebKit adapters to submit MVU messages.
 #[derive(Clone, Default)]
@@ -210,15 +211,88 @@ impl<B: LibraryBackend> AppRuntime<B> {
     #[expect(clippy::too_many_lines)]
     fn run_effect(&self, effect: Effect) {
         match effect {
+            Effect::LoadBases { request_id } => self.load_bases(request_id),
+            Effect::LoadPropertyDescriptors { request_id } => {
+                self.load_property_descriptors(request_id);
+            }
+            Effect::LoadBaseRows {
+                request_id,
+                base_id,
+                query,
+            } => self.load_base_rows(request_id, base_id, query),
+            Effect::LoadMoreBaseRows {
+                request_id,
+                base_id,
+                query,
+                offset,
+            } => self.load_more_base_rows(request_id, base_id, query, offset),
+            Effect::PreviewBaseRowCount {
+                dialog_id,
+                request_id,
+                filter_mode,
+                filters,
+            } => self.preview_base_row_count(dialog_id, request_id, filter_mode, filters),
+            Effect::CreateConfiguredBase {
+                name,
+                columns,
+                filter_mode,
+                filters,
+                sorts,
+            } => self.create_base_with_configuration(name, columns, filter_mode, filters, sorts),
+            Effect::UpdateBase {
+                base_id,
+                revision,
+                name,
+                columns,
+                filter_mode,
+                filters,
+                sorts,
+            } => self.update_base(
+                base_id,
+                revision,
+                name,
+                columns,
+                filter_mode,
+                filters,
+                sorts,
+            ),
+            Effect::DeleteBase { base_id } => self.delete_base(base_id),
+            Effect::PrepareBaseConfiguration {
+                request_id,
+                definition,
+            } => {
+                let runtime = self.clone();
+                glib::spawn_future_local(async move {
+                    runtime.dispatch(AppMsg::Library(LibraryReply::BaseConfigurationLoaded {
+                        request_id,
+                        definition,
+                        result: Ok(()),
+                    }));
+                });
+            }
+            Effect::PrepareNewBaseConfiguration { request_id } => {
+                let runtime = self.clone();
+                glib::spawn_future_local(async move {
+                    runtime.dispatch(AppMsg::Library(LibraryReply::NewBaseConfigurationLoaded {
+                        request_id,
+                        result: Ok(()),
+                    }));
+                });
+            }
             effect @ (Effect::ApplyRichEditorCommand { .. }
+            | Effect::ShowBaseConfiguration { .. }
+            | Effect::ShowNewBaseConfiguration { .. }
+            | Effect::FinishBaseConfiguration { .. }
             | Effect::ReloadRichEditor { .. }
             | Effect::ShowExternalEdit { .. }
             | Effect::SelectEditorSource { .. }
+            | Effect::FocusEditor { .. }
             | Effect::FocusDocumentTarget { .. }
             | Effect::ShowMediaPreview { .. }
             | Effect::CopyEditorDocument { .. }
             | Effect::ShowEditorExportDialog { .. }
             | Effect::ShowEditorExportWarning { .. }
+            | Effect::UpdateBaseConfigurationPreview { .. }
             | Effect::ExportEditorPdf { .. }) => self.run_editor_effect(effect),
             effect @ (Effect::PrepareEditorExport { .. }
             | Effect::WriteEditorExport { .. }
@@ -244,6 +318,8 @@ impl<B: LibraryBackend> AppRuntime<B> {
                 source,
             } => self.import_note(category_id, format, source),
             Effect::ScheduleSearch { timer_id } => self.schedule_search(timer_id),
+            Effect::ScheduleBaseSearch { timer_id } => self.schedule_base_search(timer_id),
+            Effect::ScheduleBasePreview { timer_id } => self.schedule_base_preview(timer_id),
             Effect::ScheduleEditorSave {
                 session,
                 timer_id,
@@ -284,6 +360,12 @@ impl<B: LibraryBackend> AppRuntime<B> {
                 category_id,
                 query,
             } => self.load_browser(request_id, category_id, query),
+            Effect::LoadMoreBrowser {
+                request_id,
+                category_id,
+                query,
+                offset,
+            } => self.load_more_browser(request_id, category_id, query, offset),
             Effect::LoadEditorNote {
                 request_id,
                 note_id,
@@ -419,6 +501,24 @@ impl<B: LibraryBackend> AppRuntime<B> {
         });
     }
 
+    fn schedule_base_search(&self, timer_id: super::TimerId) {
+        let runtime = self.clone();
+        glib::spawn_future_local(async move {
+            glib::timeout_future(std::time::Duration::from_millis(250)).await;
+            runtime.dispatch(AppMsg::Bases(super::BasesMsg::SearchTimerFired(timer_id)));
+        });
+    }
+
+    fn schedule_base_preview(&self, timer_id: super::TimerId) {
+        let runtime = self.clone();
+        glib::spawn_future_local(async move {
+            glib::timeout_future(std::time::Duration::from_millis(200)).await;
+            runtime.dispatch(AppMsg::Bases(super::BasesMsg::PreviewCountTimerFired(
+                timer_id,
+            )));
+        });
+    }
+
     fn ensure_default_category(&self) {
         let client = self.inner.client.clone();
         let runtime = self.clone();
@@ -473,21 +573,39 @@ impl<B: LibraryBackend> AppRuntime<B> {
         category_id: Option<carver_sdk::CategoryId>,
         query: String,
     ) {
-        self.schedule_browser_loading_indicator(request_id);
+        self.schedule_loading_indicator(AppMsg::Browser(
+            super::BrowserMsg::LoadingIndicatorElapsed(request_id),
+        ));
         let client = self.inner.client.clone();
         let runtime = self.clone();
         glib::spawn_future_local(async move {
             let (result, favorites) = if query.trim().is_empty() {
                 futures_util::future::join(
-                    client.recent_notes_async(category_id, 200, 0),
-                    client.favorite_notes_async(category_id, 200, 0),
+                    client.recent_notes_async(
+                        category_id,
+                        PageRequest {
+                            limit: RESULT_PAGE_SIZE,
+                            offset: 0,
+                        },
+                    ),
+                    client.favorite_notes_async(category_id, 12, 0),
                 )
                 .await
             } else {
                 let notes = client
-                    .search_async(query, category_id, 200)
+                    .search_async(
+                        query,
+                        category_id,
+                        PageRequest {
+                            limit: RESULT_PAGE_SIZE,
+                            offset: 0,
+                        },
+                    )
                     .await
-                    .map(|matches| matches.into_iter().map(|hit| hit.note).collect());
+                    .map(|page| carver_sdk::Page {
+                        has_more: page.has_more,
+                        items: page.items.into_iter().map(|hit| hit.note).collect(),
+                    });
                 (notes, Ok(Vec::new()))
             };
             runtime.dispatch(AppMsg::Library(LibraryReply::BrowserLoaded {
@@ -498,13 +616,11 @@ impl<B: LibraryBackend> AppRuntime<B> {
         });
     }
 
-    fn schedule_browser_loading_indicator(&self, request_id: super::RequestId) {
+    fn schedule_loading_indicator(&self, message: AppMsg) {
         let runtime = self.clone();
         glib::spawn_future_local(async move {
-            glib::timeout_future(BROWSER_LOADING_INDICATOR_DELAY).await;
-            runtime.dispatch(AppMsg::Browser(super::BrowserMsg::LoadingIndicatorElapsed(
-                request_id,
-            )));
+            glib::timeout_future(LOADING_INDICATOR_DELAY).await;
+            runtime.dispatch(message);
         });
     }
 
@@ -518,6 +634,228 @@ impl<B: LibraryBackend> AppRuntime<B> {
                 .map_err(display_error);
             runtime.dispatch(AppMsg::Library(LibraryReply::SidebarLoaded {
                 request_id,
+                result,
+            }));
+        });
+    }
+
+    fn load_bases(&self, request_id: super::RequestId) {
+        self.schedule_loading_indicator(AppMsg::Bases(super::BasesMsg::LoadingIndicatorElapsed(
+            request_id,
+        )));
+        let client = self.inner.client.clone();
+        let runtime = self.clone();
+        glib::spawn_future_local(async move {
+            let result = client.bases_async().await.map_err(display_error);
+            runtime.dispatch(AppMsg::Library(LibraryReply::BasesLoaded {
+                request_id,
+                result,
+            }));
+        });
+    }
+
+    fn load_property_descriptors(&self, request_id: super::RequestId) {
+        let client = self.inner.client.clone();
+        let runtime = self.clone();
+        glib::spawn_future_local(async move {
+            let result = client
+                .property_descriptors_async()
+                .await
+                .map_err(display_error);
+            runtime.dispatch(AppMsg::Library(LibraryReply::PropertyDescriptorsLoaded {
+                request_id,
+                result,
+            }));
+        });
+    }
+
+    fn load_base_rows(
+        &self,
+        request_id: super::RequestId,
+        base_id: carver_sdk::BaseId,
+        query: String,
+    ) {
+        self.schedule_loading_indicator(AppMsg::Bases(super::BasesMsg::LoadingIndicatorElapsed(
+            request_id,
+        )));
+        let client = self.inner.client.clone();
+        let runtime = self.clone();
+        glib::spawn_future_local(async move {
+            let page = PageRequest {
+                limit: RESULT_PAGE_SIZE,
+                offset: 0,
+            };
+            let result = if query.trim().is_empty() {
+                client.base_rows_async(base_id, page).await
+            } else {
+                client.search_base_rows_async(base_id, query, page).await
+            }
+            .map_err(display_error);
+            runtime.dispatch(AppMsg::Library(LibraryReply::BaseRowsLoaded {
+                request_id,
+                base_id,
+                result,
+            }));
+        });
+    }
+
+    fn load_more_browser(
+        &self,
+        request_id: super::RequestId,
+        category_id: Option<carver_sdk::CategoryId>,
+        query: String,
+        offset: usize,
+    ) {
+        let client = self.inner.client.clone();
+        let runtime = self.clone();
+        glib::spawn_future_local(async move {
+            let result = if query.trim().is_empty() {
+                client
+                    .recent_notes_async(
+                        category_id,
+                        PageRequest {
+                            limit: RESULT_PAGE_SIZE,
+                            offset,
+                        },
+                    )
+                    .await
+            } else {
+                client
+                    .search_async(
+                        query,
+                        category_id,
+                        PageRequest {
+                            limit: RESULT_PAGE_SIZE,
+                            offset,
+                        },
+                    )
+                    .await
+                    .map(|page| carver_sdk::Page {
+                        has_more: page.has_more,
+                        items: page.items.into_iter().map(|hit| hit.note).collect(),
+                    })
+            }
+            .map_err(display_error);
+            runtime.dispatch(AppMsg::Library(LibraryReply::BrowserAppended {
+                request_id,
+                result,
+            }));
+        });
+    }
+
+    fn load_more_base_rows(
+        &self,
+        request_id: super::RequestId,
+        base_id: carver_sdk::BaseId,
+        query: String,
+        offset: usize,
+    ) {
+        let client = self.inner.client.clone();
+        let runtime = self.clone();
+        glib::spawn_future_local(async move {
+            let page = PageRequest {
+                limit: RESULT_PAGE_SIZE,
+                offset,
+            };
+            let result = if query.trim().is_empty() {
+                client.base_rows_async(base_id, page).await
+            } else {
+                client.search_base_rows_async(base_id, query, page).await
+            }
+            .map_err(display_error);
+            runtime.dispatch(AppMsg::Library(LibraryReply::BaseRowsAppended {
+                request_id,
+                base_id,
+                result,
+            }));
+        });
+    }
+
+    fn preview_base_row_count(
+        &self,
+        dialog_id: super::RequestId,
+        request_id: super::RequestId,
+        filter_mode: carver_sdk::BaseFilterMode,
+        filters: Vec<carver_sdk::BaseFilter>,
+    ) {
+        let client = self.inner.client.clone();
+        let runtime = self.clone();
+        glib::spawn_future_local(async move {
+            let result = client
+                .base_row_count_async(filter_mode, filters)
+                .await
+                .map_err(display_error);
+            runtime.dispatch(AppMsg::Library(LibraryReply::BasePreviewCount {
+                dialog_id,
+                request_id,
+                result,
+            }));
+        });
+    }
+
+    fn create_base_with_configuration(
+        &self,
+        name: String,
+        columns: Vec<carver_sdk::BaseColumn>,
+        filter_mode: carver_sdk::BaseFilterMode,
+        filters: Vec<carver_sdk::BaseFilter>,
+        sorts: Vec<carver_sdk::BaseSort>,
+    ) {
+        let client = self.inner.client.clone();
+        let runtime = self.clone();
+        glib::spawn_future_local(async move {
+            let result = client
+                .create_base_with_configuration_async(name, columns, filter_mode, filters, sorts)
+                .await
+                .map_err(display_error);
+            runtime.dispatch(AppMsg::Library(LibraryReply::BaseCreated { result }));
+        });
+    }
+
+    // CONTEXT: Runtime forwards the typed effect without collapsing configuration fields.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Base configuration fields are explicit"
+    )]
+    fn update_base(
+        &self,
+        base_id: carver_sdk::BaseId,
+        revision: carver_sdk::Revision,
+        name: String,
+        columns: Vec<carver_sdk::BaseColumn>,
+        filter_mode: carver_sdk::BaseFilterMode,
+        filters: Vec<carver_sdk::BaseFilter>,
+        sorts: Vec<carver_sdk::BaseSort>,
+    ) {
+        let client = self.inner.client.clone();
+        let runtime = self.clone();
+        glib::spawn_future_local(async move {
+            let result = client
+                .update_base_async(
+                    base_id,
+                    revision,
+                    name,
+                    columns,
+                    filter_mode,
+                    filters,
+                    sorts,
+                )
+                .await
+                .map_err(display_error);
+            runtime.dispatch(AppMsg::Library(LibraryReply::BaseUpdated { result }));
+        });
+    }
+
+    fn delete_base(&self, base_id: carver_sdk::BaseId) {
+        let client = self.inner.client.clone();
+        let runtime = self.clone();
+        glib::spawn_future_local(async move {
+            let result = client
+                .delete_base_async(base_id)
+                .await
+                .map_err(display_error);
+            runtime.dispatch(AppMsg::Library(LibraryReply::BaseDeleted {
+                base_id,
                 result,
             }));
         });
