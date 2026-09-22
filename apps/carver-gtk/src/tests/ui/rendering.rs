@@ -129,3 +129,34 @@ pub(super) fn code_fences_should_be_highlighted_in_previews_and_source() -> Test
     fixture.window.close();
     Ok(())
 }
+
+pub(super) fn code_blocks_should_anchor_the_picker_and_keep_diff_lines_inline() -> TestResult {
+    let fixture = document_sidebar::fixture()?;
+    let category = fixture.client.create_category("Code blocks")?;
+    let note = fixture.client.create_note(category.id)?;
+    let source = "```php\necho $var;\n```\n\n{.diff}\n```php\n  echo 'hello world';\n- echo $var;\n+ echo $var;\n```\n";
+    let saved = fixture.client.save_note(note.id, note.revision, source)?;
+    fixture.runtime.dispatch(AppMsg::Editor(EditorMsg::Load {
+        note_id: saved.id,
+        revision: saved.revision,
+        source: saved.source.clone(),
+    }));
+    let rich =
+        widget_as::<webkit6::WebView>(&fixture.surface, "rich-editor").ok_or("rich editor")?;
+    // CarveKit renders the picker in `.carve-code-block-chrome` after the
+    // scrollable <pre>, so it must be anchored to the block's top-right corner
+    // rather than take a row of its own below the code.
+    assert_web_script_should_be_true(
+        &rich,
+        "(() => { const block = document.querySelector('.carve-code-block'); const chrome = block?.querySelector(':scope > .carve-code-block-chrome'); if (!block || !chrome || !chrome.querySelector('select.carve-code-lang')) return false; const style = getComputedStyle(chrome); const blockRect = block.getBoundingClientRect(); const chromeRect = chrome.getBoundingClientRect(); return style.position === 'absolute' && Math.abs(chromeRect.right - blockRect.right) <= 12 && chromeRect.top - blockRect.top <= 12; })()",
+    );
+    // Diff decorations are inline in the editor. Block rows are a preview-only
+    // treatment; in the editor token decorations split each line decoration, so
+    // `display: block` would turn every token fragment into its own row.
+    assert_web_script_should_be_true(
+        &rich,
+        "(() => { const lines = document.querySelectorAll('.ProseMirror .carver-diff-line'); return lines.length >= 2 && [...lines].every((line) => getComputedStyle(line).display !== 'block'); })()",
+    );
+    fixture.window.close();
+    Ok(())
+}
