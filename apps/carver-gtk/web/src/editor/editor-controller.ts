@@ -14,6 +14,7 @@ import { resizeSelectedImage } from './image-resize';
 import { insertOrUpdateLink, linkContext } from './link';
 import { ClipboardPasteSanitizer } from './paste-sanitizer';
 import { mightBeMarkupText, plainTextSlice } from './paste-format';
+import { DiffCodeBlockDecorations } from './diff-decorations';
 import { selectedCarveSource } from './selection-copy';
 import type {
   DocumentTarget,
@@ -102,7 +103,11 @@ export class EditorController implements RichEditorApi {
   public initialize(): void {
     this.editor = this.createEditor({
       element: this.root,
-      extensions: [CarveKit.configure({ image: false }), CarveImage],
+      extensions: [
+        CarveKit.configure({ image: false }),
+        CarveImage,
+        DiffCodeBlockDecorations,
+      ],
       content: { type: 'doc', content: [{ type: 'paragraph' }] },
       editorProps: {
         handlePaste: (_view, event) => {

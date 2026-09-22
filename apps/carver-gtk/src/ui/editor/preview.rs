@@ -254,6 +254,7 @@ pub(super) fn rendered_document_with_profile(
         glib::g_warning!("carver", "Could not rewrite preview images: {error}");
         String::from("<p>Could not render the note preview.</p>")
     });
+    let body = rewrite_preview_diff_blocks(&body);
     let stylesheet = preview_document_style(theme, appearance);
     format!(
         "<!doctype html><html data-theme=\"{color_scheme}\"><head><meta charset=\"utf-8\"><meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; style-src 'unsafe-inline'; {image_sources}; font-src 'none'; script-src 'none'; connect-src 'none'; frame-src 'none'\"><style>{stylesheet}</style></head><body data-preview data-carver-heading-token=\"{heading_token}\">{body}</body></html>",
@@ -270,6 +271,86 @@ fn rewrite_preview_images(html: &str) -> Result<String, lol_html::errors::Rewrit
         }
         Ok(())
     })
+}
+
+fn rewrite_preview_diff_blocks(html: &str) -> String {
+    const PRE_START: &str = "<pre";
+    const CODE_START: &str = "<code";
+    const CODE_END: &str = "</code></pre>";
+
+    let mut rewritten = String::with_capacity(html.len());
+    let mut remaining = html;
+    while let Some(start) = remaining.find(PRE_START) {
+        let (before, candidate) = remaining.split_at(start);
+        rewritten.push_str(before);
+        let Some(pre_end) = candidate.find('>') else {
+            rewritten.push_str(candidate);
+            break;
+        };
+        let (pre_tag, code_and_end) = candidate.split_at(pre_end + 1);
+        let Some(code_and_end) = code_and_end.strip_prefix(CODE_START) else {
+            rewritten.push_str(pre_tag);
+            remaining = code_and_end;
+            continue;
+        };
+        let Some(code_end) = code_and_end.find('>') else {
+            rewritten.push_str(candidate);
+            break;
+        };
+        let (code_attributes, content_and_end) = code_and_end.split_at(code_end + 1);
+        let Some(end) = content_and_end.find(CODE_END) else {
+            rewritten.push_str(candidate);
+            break;
+        };
+        let (content, closing_tag) = content_and_end.split_at(end);
+        rewritten.push_str(pre_tag);
+        rewritten.push_str(CODE_START);
+        rewritten.push_str(code_attributes);
+        if has_html_class(pre_tag, "diff") || has_html_class(code_attributes, "language-diff") {
+            rewritten.push_str(&render_diff_lines(content));
+        } else {
+            rewritten.push_str(content);
+        }
+        rewritten.push_str(CODE_END);
+        remaining = &closing_tag[CODE_END.len()..];
+    }
+    rewritten.push_str(remaining);
+    rewritten
+}
+
+fn has_html_class(opening_tag: &str, expected: &str) -> bool {
+    opening_tag
+        .split_once("class=\"")
+        .and_then(|(_, value)| value.split_once('"'))
+        .is_some_and(|(classes, _)| {
+            classes
+                .split_ascii_whitespace()
+                .any(|class| class == expected)
+        })
+}
+
+fn render_diff_lines(content: &str) -> String {
+    content
+        .split_inclusive('\n')
+        .map(|line| match diff_line_class(line) {
+            Some(class) => format!("<span class=\"carver-diff-line {class}\">{line}</span>"),
+            None => line.to_owned(),
+        })
+        .collect()
+}
+
+fn diff_line_class(line: &str) -> Option<&'static str> {
+    if line.starts_with("+++") || line.starts_with("---") {
+        None
+    } else if line.starts_with('+') {
+        Some("carver-diff-add")
+    } else if line.starts_with('-') {
+        Some("carver-diff-remove")
+    } else if line.starts_with("@@") {
+        Some("carver-diff-hunk")
+    } else {
+        None
+    }
 }
 
 /// Loads a static print snapshot with disclosure contents expanded.

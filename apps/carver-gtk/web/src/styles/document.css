@@ -4,6 +4,12 @@
   --document-foreground: #ffffff;
   --code-background: #303036;
   --code-language-background: #25252a;
+  --diff-add-background: #163d25;
+  --diff-add-foreground: #b7f7c7;
+  --diff-remove-background: #4a2027;
+  --diff-remove-foreground: #ffd1d6;
+  --diff-hunk-background: #25385c;
+  --diff-hunk-foreground: #c9dcff;
   --border-color: #5b5b63;
   --table-header-background: #38383f;
   --accent-color: #358e45;
@@ -104,6 +110,23 @@ body[data-preview] {
 
 :where(.ProseMirror, body[data-preview]) pre > code {
   display: block;
+}
+:where(.ProseMirror, body[data-preview]) .carver-diff-line {
+  display: block;
+  margin-inline: -12px;
+  padding-inline: 12px;
+}
+:where(.ProseMirror, body[data-preview]) .carver-diff-add {
+  background: var(--diff-add-background);
+  color: var(--diff-add-foreground);
+}
+:where(.ProseMirror, body[data-preview]) .carver-diff-remove {
+  background: var(--diff-remove-background);
+  color: var(--diff-remove-foreground);
+}
+:where(.ProseMirror, body[data-preview]) .carver-diff-hunk {
+  background: var(--diff-hunk-background);
+  color: var(--diff-hunk-foreground);
 }
 /* Images are inline by default.  Carve keeps consecutive image lines in one
  * paragraph (with soft breaks), while an isolated image is a block node.  A
@@ -255,6 +278,12 @@ body[data-preview] li > ul:has(> li > input[type="checkbox"]) {
   --document-foreground: #333334;
   --code-background: #ededf1;
   --code-language-background: #ffffff;
+  --diff-add-background: #d8f5df;
+  --diff-add-foreground: #174d29;
+  --diff-remove-background: #f8dde1;
+  --diff-remove-foreground: #7f1f2d;
+  --diff-hunk-background: #dce8ff;
+  --diff-hunk-foreground: #1d4278;
   --border-color: #b7b7c0;
   --table-header-background: #e7e7ec;
 }
