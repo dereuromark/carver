@@ -29,7 +29,7 @@ function highlightDiff(code: HTMLElement, language: string | null): void {
         highlightCode(language, content) ?? escapeHtml(content);
       return `<span class="carver-diff-line${diffLineClass(line)}">${escapeHtml(marker)}${highlighted}</span>`;
     })
-    .join('\n');
+    .join('');
 }
 
 export function highlightPreviewCode(root: ParentNode = document): void {

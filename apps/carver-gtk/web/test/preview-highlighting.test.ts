@@ -24,6 +24,7 @@ describe('highlightPreviewCode', () => {
 
     expect(document.querySelector('code')?.innerHTML).toContain('hljs-keyword');
     expect(document.querySelectorAll('.carver-diff-line')).toHaveLength(2);
+    expect(document.querySelector('code')?.childNodes).toHaveLength(2);
   });
 
   it('keeps diff semantics when the fence language is unknown', () => {
