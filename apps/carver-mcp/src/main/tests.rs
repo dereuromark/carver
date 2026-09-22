@@ -45,7 +45,20 @@ async fn create_and_read_note(server: &CarverServer) -> Result<(CategoryId, Note
         }))
         .await
         .map_err(|error| error.to_string())?;
-    assert!(created.contains("fidelity-unverified"));
+    let created_report =
+        serde_json::from_str::<serde_json::Value>(&created).map_err(|error| error.to_string())?;
+    assert_eq!(
+        created_report["report"]["schema_version"],
+        serde_json::json!(2)
+    );
+    assert_eq!(
+        created_report["report"]["source_format"],
+        serde_json::json!("markdown")
+    );
+    assert_eq!(
+        created_report["report"]["diagnostics"][0]["code"],
+        serde_json::json!("fidelity-unverified")
+    );
     let note_id = id(&created)?;
     let listed = server
         .list_notes(Parameters(ListNotesRequest {
@@ -107,6 +120,17 @@ async fn save_move_and_restore_note(
         .await
         .map_err(|error| error.to_string())?;
     assert!(saved.contains("Saved as Carve"));
+    let saved_report =
+        serde_json::from_str::<serde_json::Value>(&saved).map_err(|error| error.to_string())?;
+    assert_eq!(
+        saved_report["report"]["schema_version"],
+        serde_json::json!(2)
+    );
+    assert_eq!(
+        saved_report["report"]["source_format"],
+        serde_json::json!("carve")
+    );
+    assert_eq!(saved_report["report"]["diagnostics"], serde_json::json!([]));
 
     let category = server
         .create_category(Parameters(CreateCategoryRequest {

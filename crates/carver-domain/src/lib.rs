@@ -31,12 +31,11 @@ pub enum DocumentImportFormat {
     Markdown,
 }
 
-/// Migration-report contract understood by this Carver release.
+/// Carver's importer-fidelity report contract version, written for every import format.
 pub const IMPORT_REPORT_SCHEMA_VERSION: u32 = 2;
 
 /// The canonical source and the fidelity evidence produced while importing it.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct DocumentImportResult {
     /// Canonical Carve source.
     pub value: String,
@@ -46,9 +45,8 @@ pub struct DocumentImportResult {
 
 /// A binding-neutral form of Carve's importer-fidelity report.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct DocumentImportReport {
-    /// Report contract version.
+    /// Carver's report contract version, independent of the source format.
     pub schema_version: u32,
     /// Format presented at the import boundary.
     pub source_format: String,
@@ -91,7 +89,7 @@ pub fn assess_import(source: &str, format: DocumentImportFormat) -> DocumentImpo
             DocumentImportResult {
                 value: result.value,
                 report: DocumentImportReport {
-                    schema_version: result.report.schema_version,
+                    schema_version: IMPORT_REPORT_SCHEMA_VERSION,
                     source_format: result.report.source_format.as_str().to_owned(),
                     diagnostics: result
                         .report
