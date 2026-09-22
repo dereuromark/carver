@@ -29,6 +29,31 @@ fn rendered_document_matches_the_editor_block_presentation() {
 }
 
 #[test]
+fn rendered_document_marks_diff_lines_for_colored_preview() {
+    let html = rendered_document(
+        "{.diff}\n```js\n let fileIcon = document.querySelector(\"li.file-entry > span.icon\");\n-fileIcon.classList.add(\"icon-file-text\");\n+fileIcon.classList.remove(\"icon-file-text\");\n```",
+        false,
+    );
+
+    assert!(html.contains("carver-diff-line carver-diff-remove"));
+    assert!(html.contains("carver-diff-line carver-diff-add"));
+    assert!(html.contains("<pre class=\"diff\"><code class=\"language-js\">"));
+    assert!(PREVIEW_STYLESHEET.contains(".carver-diff-add"));
+    assert!(PREVIEW_STYLESHEET.contains(".carver-diff-remove"));
+}
+
+#[test]
+fn rendered_diff_fallback_should_wrap_every_line_without_embedded_newlines() {
+    let html = rendered_document("{.diff}\n```text\n context\n+added\n-removed\n```", false);
+
+    // The injected highlighter re-renders these blocks; the native fallback must
+    // match its block-span shape so a scriptless preview keeps one line per row.
+    assert!(html.contains("<span class=\"carver-diff-line\"> context</span>"));
+    assert!(html.contains("<span class=\"carver-diff-line carver-diff-add\">+added</span>"));
+    assert!(html.contains("<span class=\"carver-diff-line carver-diff-remove\">-removed</span>"));
+}
+
+#[test]
 fn shared_document_inset_should_live_on_the_body() {
     assert!(PREVIEW_STYLESHEET.contains("body {\n  box-sizing: border-box;"));
     assert!(PREVIEW_STYLESHEET.contains("padding: 24px;"));
