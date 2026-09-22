@@ -73,6 +73,21 @@ export type EditorEvent =
        */
       session: number;
       type: 'paste-image';
+    }
+  | {
+      /**
+       * Web-surface request identity echoed back with the imported source.
+       */
+      request_id: number;
+      /**
+       * Host document session.
+       */
+      session: number;
+      /**
+       * Raw pasted text.
+       */
+      text: string;
+      type: 'paste-text';
     };
 
 /**

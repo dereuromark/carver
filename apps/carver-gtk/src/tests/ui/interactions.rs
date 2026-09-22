@@ -118,7 +118,7 @@ pub(super) fn source_image_paste_should_store_a_managed_asset() -> TestResult {
         .iter::<glib::Object>()
         .flatten()
         .filter_map(|controller| controller.downcast::<gtk::EventControllerKey>().ok())
-        .find(|controller| controller.name().as_deref() == Some("source-image-paste"))
+        .find(|controller| controller.name().as_deref() == Some("source-smart-paste"))
         .ok_or("image paste controller")?;
     paste.emit_by_name::<bool>(
         "key-pressed",
@@ -143,6 +143,95 @@ pub(super) fn source_image_paste_should_store_a_managed_asset() -> TestResult {
             .is_some()
     );
     clipboard.set_content(None::<&gtk::gdk::ContentProvider>)?;
+    fixture.window.close();
+    Ok(())
+}
+
+pub(super) fn source_markdown_paste_should_migrate_before_inserting() -> TestResult {
+    let fixture = document_sidebar::fixture()?;
+    let category = fixture.client.create_category("Paste")?;
+    let note = fixture.client.create_note(category.id)?;
+    fixture.runtime.dispatch(AppMsg::Editor(EditorMsg::Load {
+        note_id: note.id,
+        revision: note.revision,
+        source: String::new(),
+    }));
+    let source =
+        widget_as::<sourceview5::View>(&fixture.surface, "source-editor").ok_or("source")?;
+    let clipboard = source.clipboard();
+    clipboard.set_text("**bold**");
+    let controllers = source.observe_controllers();
+    let paste = controllers
+        .iter::<glib::Object>()
+        .flatten()
+        .filter_map(|controller| controller.downcast::<gtk::EventControllerKey>().ok())
+        .find(|controller| controller.name().as_deref() == Some("source-smart-paste"))
+        .ok_or("smart paste controller")?;
+    paste.emit_by_name::<bool>(
+        "key-pressed",
+        &[
+            &gtk::gdk::Key::v,
+            &0_u32,
+            &gtk::gdk::ModifierType::CONTROL_MASK,
+        ],
+    );
+    assert!(run_main_context_until(|| fixture
+        .runtime
+        .model()
+        .editor
+        .is_some_and(
+            |doc| doc.source.contains("*bold*") && !doc.source.contains("**")
+        )));
+    clipboard.set_content(None::<&gtk::gdk::ContentProvider>)?;
+    fixture.window.close();
+    Ok(())
+}
+
+pub(super) fn rich_changes_should_be_ignored_while_another_mode_is_active() -> TestResult {
+    let fixture = document_sidebar::fixture()?;
+    fixture.runtime.dispatch(AppMsg::Editor(EditorMsg::Load {
+        note_id: carver_sdk::NoteId::new(),
+        revision: carver_sdk::Revision(1),
+        source: "# Current".into(),
+    }));
+    widget_as::<gtk::ToggleButton>(&fixture.surface, "editor-mode-rich")
+        .ok_or("rich mode")?
+        .set_active(true);
+    let rich = widget_as::<webkit6::WebView>(&fixture.surface, "rich-editor").ok_or("rich")?;
+    assert_web_script_should_be_true(
+        &rich,
+        "Boolean(window.carverEditor && document.querySelector('.tiptap'))",
+    );
+    // The active rich projection may commit a source change.
+    assert_web_script_should_be_true(
+        &rich,
+        r"(() => {
+        window.webkit.messageHandlers.carver.postMessage(JSON.stringify({type:'changed', session:2, revision:1, source:'# From rich'}));
+        return true;
+    })()",
+    );
+    assert!(run_main_context_until(|| fixture
+        .runtime
+        .model()
+        .editor
+        .is_some_and(|doc| doc.source.contains("From rich"))));
+
+    widget_as::<gtk::ToggleButton>(&fixture.surface, "editor-mode-source")
+        .ok_or("source mode")?
+        .set_active(true);
+    assert!(run_main_context_until(|| !rich.is_mapped()));
+    // A late rich change must not overwrite the now-active source projection.
+    assert_web_script_should_be_true(
+        &rich,
+        r"(() => {
+        window.webkit.messageHandlers.carver.postMessage(JSON.stringify({type:'changed', session:2, revision:2, source:'# Stale'}));
+        return true;
+    })()",
+    );
+    assert_web_script_should_be_true(&rich, "true");
+    let source = fixture.runtime.model().editor.ok_or("editor")?.source;
+    assert!(source.contains("From rich"));
+    assert!(!source.contains("Stale"));
     fixture.window.close();
     Ok(())
 }

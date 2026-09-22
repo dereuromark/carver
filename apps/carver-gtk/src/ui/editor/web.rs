@@ -179,6 +179,24 @@ impl RichEditor {
         ));
     }
 
+    /// Inserts host-imported pasted text into the rich projection.
+    pub(crate) fn insert_pasted_source(
+        &self,
+        request_id: u64,
+        source: &str,
+        structured: bool,
+        fallback: &str,
+        host_initiated: bool,
+    ) {
+        self.evaluate(&format!(
+            "window.carverEditor.insertPastedSource({request_id}, {}, {}, {}, {});",
+            json(source),
+            structured,
+            json(fallback),
+            host_initiated
+        ));
+    }
+
     /// Focuses the rich-text document at its insertion point.
     pub(crate) fn focus(&self) {
         self.view.grab_focus();
@@ -320,7 +338,7 @@ impl RichEditor {
                     session,
                     source,
                     revision,
-                } if session == editor.session.get() => {
+                } if session == editor.session.get() && editor.view.is_mapped() => {
                     editor.revision.set(revision);
                     editor.canonical_source.replace(Rc::from(source.as_str()));
                     for message in rich_source_change_messages(source) {
@@ -360,6 +378,18 @@ impl RichEditor {
                         bytes,
                     }));
                 }
+                EditorEvent::PasteText {
+                    session,
+                    request_id,
+                    text,
+                } if session == editor.session.get() => {
+                    let _ = dispatcher.dispatch(AppMsg::Editor(EditorMsg::PasteRichText {
+                        request_id,
+                        text,
+                        intent: carver_domain::PasteIntent::Auto,
+                        host_initiated: false,
+                    }));
+                }
                 EditorEvent::CopySelection { session, source }
                     if session == editor.session.get() =>
                 {
@@ -395,7 +425,8 @@ impl RichEditor {
                 | EditorEvent::Changed { .. }
                 | EditorEvent::Unsupported { .. }
                 | EditorEvent::CopySelection { .. }
-                | EditorEvent::PasteImage { .. } => {}
+                | EditorEvent::PasteImage { .. }
+                | EditorEvent::PasteText { .. } => {}
             }
         });
     }

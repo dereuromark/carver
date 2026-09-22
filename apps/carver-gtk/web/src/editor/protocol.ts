@@ -23,6 +23,13 @@ export interface RichEditorApi {
   ): boolean;
   linkContext(): LinkContext;
   insertImage(path: string, alt?: string): void;
+  insertPastedSource(
+    requestId: number,
+    source: string,
+    structured: boolean,
+    fallbackText: string,
+    hostInitiated?: boolean,
+  ): void;
   setTheme(
     dark: boolean,
     accent: string,
