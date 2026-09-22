@@ -12,6 +12,10 @@ mod heading_provenance;
 
 const PREVIEW_STYLESHEET: &str =
     include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/web/dist/preview.css"));
+const PREVIEW_HIGHLIGHTING: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/web/dist/preview-highlighting.js"
+));
 
 /// Builds a non-editable `WebKitGTK` view for trusted Carve renderer output.
 pub(super) fn build_preview(
@@ -21,6 +25,13 @@ pub(super) fn build_preview(
     let context = webkit6::WebContext::new();
     install_editor_asset_scheme(&context, assets_dir.map(Path::to_path_buf));
     let manager = webkit6::UserContentManager::new();
+    manager.add_script(&webkit6::UserScript::new(
+        PREVIEW_HIGHLIGHTING,
+        webkit6::UserContentInjectedFrames::TopFrame,
+        webkit6::UserScriptInjectionTime::End,
+        &[],
+        &[],
+    ));
     let settings = webkit6::Settings::new();
     // The preview document's CSP keeps document markup scriptless. JavaScript
     // stays enabled solely for the native split-preview scroll bridge, which

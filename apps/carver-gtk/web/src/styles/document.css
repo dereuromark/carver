@@ -128,6 +128,28 @@ body[data-preview] {
   background: var(--diff-hunk-background);
   color: var(--diff-hunk-foreground);
 }
+:where(.ProseMirror, body[data-preview]) .hljs-comment,
+:where(.ProseMirror, body[data-preview]) .hljs-quote {
+  color: #8b949e;
+}
+:where(.ProseMirror, body[data-preview]) .hljs-keyword,
+:where(.ProseMirror, body[data-preview]) .hljs-selector-tag,
+:where(.ProseMirror, body[data-preview]) .hljs-literal {
+  color: #ff7b72;
+}
+:where(.ProseMirror, body[data-preview]) .hljs-string,
+:where(.ProseMirror, body[data-preview]) .hljs-attr {
+  color: #a5d6ff;
+}
+:where(.ProseMirror, body[data-preview]) .hljs-number,
+:where(.ProseMirror, body[data-preview]) .hljs-built_in,
+:where(.ProseMirror, body[data-preview]) .hljs-title.function_ {
+  color: #d2a8ff;
+}
+:where(.ProseMirror, body[data-preview]) .hljs-meta,
+:where(.ProseMirror, body[data-preview]) .hljs-symbol {
+  color: #ffa657;
+}
 /* Images are inline by default.  Carve keeps consecutive image lines in one
  * paragraph (with soft breaks), while an isolated image is a block node.  A
  * blanket `display: block` loses that distinction and turns badge runs into a
