@@ -284,6 +284,13 @@ fn rewrite_preview_images(html: &str) -> Result<String, lol_html::errors::Rewrit
     })
 }
 
+/// Wraps unified-diff lines in colored spans for the rendered preview.
+///
+/// The preview view also injects `preview-highlighting.js`, which re-renders
+/// diff fences with syntax token colors and supersedes this pass. This native
+/// rewrite is the no-script fallback (and the shape the injected script expects
+/// on load), so it mirrors that output: every line is a `carver-diff-line`
+/// block span without its trailing newline, and `+++`/`---` headers stay plain.
 fn rewrite_preview_diff_blocks(html: &str) -> String {
     const PRE_START: &str = "<pre";
     const CODE_START: &str = "<code";
@@ -330,8 +337,11 @@ fn rewrite_preview_diff_blocks(html: &str) -> String {
 }
 
 fn has_html_class(opening_tag: &str, expected: &str) -> bool {
+    // The Carve renderer emits canonical double-quoted, space-separated
+    // attributes, so requiring the leading space keeps `data-class="..."` from
+    // being mistaken for the element's class.
     opening_tag
-        .split_once("class=\"")
+        .split_once(" class=\"")
         .and_then(|(_, value)| value.split_once('"'))
         .is_some_and(|(classes, _)| {
             classes
@@ -342,10 +352,10 @@ fn has_html_class(opening_tag: &str, expected: &str) -> bool {
 
 fn render_diff_lines(content: &str) -> String {
     content
-        .split_inclusive('\n')
+        .split('\n')
         .map(|line| match diff_line_class(line) {
             Some(class) => format!("<span class=\"carver-diff-line {class}\">{line}</span>"),
-            None => line.to_owned(),
+            None => format!("<span class=\"carver-diff-line\">{line}</span>"),
         })
         .collect()
 }

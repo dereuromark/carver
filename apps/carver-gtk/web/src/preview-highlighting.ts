@@ -1,4 +1,5 @@
 import { highlightCode } from './editor/code-highlighting';
+import { diffLineKind } from './editor/diff-line';
 
 function escapeHtml(value: string): string {
   return value.replace(/[&<>]/g, (character) => {
@@ -9,14 +10,8 @@ function escapeHtml(value: string): string {
 }
 
 function diffLineClass(line: string): string {
-  if (line.startsWith('+') && !line.startsWith('+++')) {
-    return ' carver-diff-add';
-  }
-  if (line.startsWith('-') && !line.startsWith('---')) {
-    return ' carver-diff-remove';
-  }
-  if (line.startsWith('@@')) return ' carver-diff-hunk';
-  return '';
+  const kind = diffLineKind(line);
+  return kind ? ` carver-diff-${kind}` : '';
 }
 
 function highlightDiff(code: HTMLElement, language: string | null): void {

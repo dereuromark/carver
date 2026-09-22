@@ -4,6 +4,11 @@
   --document-foreground: #ffffff;
   --code-background: #303036;
   --code-language-background: #25252a;
+  --code-comment: #8b949e;
+  --code-keyword: #ff7b72;
+  --code-string: #a5d6ff;
+  --code-number: #d2a8ff;
+  --code-meta: #ffa657;
   --diff-add-background: #163d25;
   --diff-add-foreground: #b7f7c7;
   --diff-remove-background: #4a2027;
@@ -130,25 +135,25 @@ body[data-preview] {
 }
 :where(.ProseMirror, body[data-preview]) .hljs-comment,
 :where(.ProseMirror, body[data-preview]) .hljs-quote {
-  color: #8b949e;
+  color: var(--code-comment);
 }
 :where(.ProseMirror, body[data-preview]) .hljs-keyword,
 :where(.ProseMirror, body[data-preview]) .hljs-selector-tag,
 :where(.ProseMirror, body[data-preview]) .hljs-literal {
-  color: #ff7b72;
+  color: var(--code-keyword);
 }
 :where(.ProseMirror, body[data-preview]) .hljs-string,
 :where(.ProseMirror, body[data-preview]) .hljs-attr {
-  color: #a5d6ff;
+  color: var(--code-string);
 }
 :where(.ProseMirror, body[data-preview]) .hljs-number,
 :where(.ProseMirror, body[data-preview]) .hljs-built_in,
 :where(.ProseMirror, body[data-preview]) .hljs-title.function_ {
-  color: #d2a8ff;
+  color: var(--code-number);
 }
 :where(.ProseMirror, body[data-preview]) .hljs-meta,
 :where(.ProseMirror, body[data-preview]) .hljs-symbol {
-  color: #ffa657;
+  color: var(--code-meta);
 }
 /* Images are inline by default.  Carve keeps consecutive image lines in one
  * paragraph (with soft breaks), while an isolated image is a block node.  A
@@ -300,6 +305,11 @@ body[data-preview] li > ul:has(> li > input[type="checkbox"]) {
   --document-foreground: #333334;
   --code-background: #ededf1;
   --code-language-background: #ffffff;
+  --code-comment: #6e7781;
+  --code-keyword: #cf222e;
+  --code-string: #0a3069;
+  --code-number: #8250df;
+  --code-meta: #953800;
   --diff-add-background: #d8f5df;
   --diff-add-foreground: #174d29;
   --diff-remove-background: #f8dde1;
@@ -324,6 +334,17 @@ body[data-preview] li > ul:has(> li > input[type="checkbox"]) {
     --document-background: #ffffff;
     --document-foreground: #1d1d20;
     --code-background: #f3f3f5;
+    --code-comment: #6e7781;
+    --code-keyword: #cf222e;
+    --code-string: #0a3069;
+    --code-number: #8250df;
+    --code-meta: #953800;
+    --diff-add-background: #d8f5df;
+    --diff-add-foreground: #174d29;
+    --diff-remove-background: #f8dde1;
+    --diff-remove-foreground: #7f1f2d;
+    --diff-hunk-background: #dce8ff;
+    --diff-hunk-foreground: #1d4278;
     --border-color: #8b8b92;
     --table-header-background: #f0f0f2;
   }

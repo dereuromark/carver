@@ -3,12 +3,11 @@ import type { Node } from '@tiptap/pm/model';
 import { Plugin } from '@tiptap/pm/state';
 import { Decoration, DecorationSet } from '@tiptap/pm/view';
 
+import { diffLineKind } from './diff-line';
+
 export function diffLineClass(line: string): string | null {
-  if (line.startsWith('+++') || line.startsWith('---')) return null;
-  if (line.startsWith('+')) return 'carver-diff-line carver-diff-add';
-  if (line.startsWith('-')) return 'carver-diff-line carver-diff-remove';
-  if (line.startsWith('@@')) return 'carver-diff-line carver-diff-hunk';
-  return null;
+  const kind = diffLineKind(line);
+  return kind ? `carver-diff-line carver-diff-${kind}` : null;
 }
 
 function isDiffCodeBlock(attributes: Record<string, unknown>): boolean {
