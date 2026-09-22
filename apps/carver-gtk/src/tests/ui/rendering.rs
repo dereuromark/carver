@@ -76,3 +76,56 @@ pub(super) fn rendering_preference_should_refresh_previews_without_saving() -> T
     fixture.window.close();
     Ok(())
 }
+
+pub(super) fn code_fences_should_be_highlighted_in_previews_and_source() -> TestResult {
+    let fixture = document_sidebar::fixture()?;
+    let category = fixture.client.create_category("Highlighting")?;
+    let note = fixture.client.create_note(category.id)?;
+    let source = "{.diff}\n```js\n  let icon = 1;\n- icon.add(\"a\");\n+ icon.remove(\"a\");\n```\n\n````\n```js\ninner\n```\n````\n\n# After\n\n```carve\n## Nested\n```\n";
+    let saved = fixture.client.save_note(note.id, note.revision, source)?;
+    fixture.runtime.dispatch(AppMsg::Editor(EditorMsg::Load {
+        note_id: saved.id,
+        revision: saved.revision,
+        source: saved.source.clone(),
+    }));
+    for (mode, name) in [
+        (
+            carver_config::EditorMode::Rendered,
+            "editor-rendered-preview",
+        ),
+        (carver_config::EditorMode::Source, "source-split-preview"),
+    ] {
+        fixture
+            .runtime
+            .dispatch(AppMsg::Preferences(PreferencesMsg::SetEditorMode(mode)));
+        fixture
+            .runtime
+            .dispatch(AppMsg::Preferences(PreferencesMsg::SetSourceSplitView(
+                true,
+            )));
+        let view = widget_as::<webkit6::WebView>(&fixture.surface, name).ok_or("preview")?;
+        // Navigation reinstalls its script on every load; the highlighter must survive that.
+        assert_web_script_should_be_true(
+            &view,
+            "(() => { const rows = document.querySelectorAll('pre.diff .carver-diff-line'); return rows.length >= 3 && Boolean(rows[0].querySelector('.hljs-keyword')) && rows[1].classList.contains('carver-diff-remove') && rows[2].classList.contains('carver-diff-add') && Boolean(document.querySelector('code.language-carve .hljs-section')); })()",
+        );
+    }
+
+    let source_view =
+        widget_as::<sourceview5::View>(&fixture.surface, "source-editor").ok_or("source")?;
+    let buffer = source_view
+        .buffer()
+        .downcast::<sourceview5::Buffer>()
+        .map_err(|_| "source buffer")?;
+    buffer.ensure_highlight(&buffer.start_iter(), &buffer.end_iter());
+    let line = |index: i32| buffer.iter_at_line(index).ok_or("line");
+    assert!(buffer.iter_has_context_class(&line(2)?, "carve-code-block"));
+    // The inner ``` of the four-backtick fence must not close it.
+    assert!(buffer.iter_has_context_class(&line(10)?, "carve-code-block"));
+    assert!(buffer.iter_has_context_class(&line(13)?, "carve-heading"));
+    assert!(!buffer.iter_has_context_class(&line(13)?, "carve-code-block"));
+    assert!(buffer.iter_has_context_class(&line(16)?, "carve-code-line"));
+    assert!(buffer.iter_has_context_class(&line(16)?, "carve-heading"));
+    fixture.window.close();
+    Ok(())
+}
